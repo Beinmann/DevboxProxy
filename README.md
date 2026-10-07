@@ -19,11 +19,13 @@ port of any running devbox container in your browser (ticket 004).
   proxy), so apps see a root path — absolute asset URLs and HMR work. Host
   is passed through unchanged (Vite allows `*.localhost` by default);
   `X-Forwarded-*` headers are added.
-- **Reaching containers.** The proxy runs as a container and is attached to
-  each devbox's compose network by `connect_networks.sh` (run by
-  `start_proxy.sh`; re-run after starting a new devbox). Targets are
-  resolved by container name via Docker DNS, so no ports need publishing
-  and it behaves the same on Linux, WSL and Docker Desktop.
+- **Reaching containers.** The proxy runs as a container on the shared
+  Docker network `devbox-net`, which every devbox also joins (DevBox's
+  compose file; the network is created by whichever script runs first).
+  Targets are resolved by container name via Docker DNS, so no ports need
+  publishing and it behaves the same on Linux, WSL and Docker Desktop.
+  Requires a DevBox version with `devbox-net`; recreate older boxes
+  (`./stop_dev_container.sh`, then start again).
 - **Security.** Published on `127.0.0.1` only. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
@@ -32,11 +34,7 @@ port of any running devbox container in your browser (ticket 004).
 
 ## Known limitations
 
-- A devbox started after the proxy needs `./connect_networks.sh`.
-- While attached, the proxy keeps a devbox's compose network "in use", so
-  that devbox's `docker compose down` can't remove the network. Run
-  `./stop_proxy.sh` first (it detaches). A shared external network in
-  DevBox's compose file would fix both; not done yet.
+- Boxes share `devbox-net`, so they can reach each other too.
 - HTTP only; see ticket 005 for a real domain + HTTPS.
 
 ## Tests

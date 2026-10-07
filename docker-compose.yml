@@ -17,7 +17,7 @@ services:
   devbox-proxy:
     build: .
     image: devbox-proxy
-    container_name: devbox-proxy   # fixed name: connect_networks.sh targets it
+    container_name: devbox-proxy
     depends_on: [docker-socket-proxy]
     environment:
       DOCKER_API: http://docker-socket-proxy:2375
@@ -27,9 +27,14 @@ services:
       # Loopback only: the proxy forwards to anything in the devbox
       # containers, so it must not be reachable from the LAN.
       - "127.0.0.1:${PROXY_PORT:-8080}:8080"
-    networks: [internal, default]
+    networks: [internal, devbox-net]
     restart: "no"
 
 networks:
   internal:
     internal: true
+  # Shared with every devbox (see DevBox's docker-compose.yml); created by
+  # start_proxy.sh / bash_in_dev_container.sh.
+  devbox-net:
+    external: true
+    name: devbox-net
