@@ -26,6 +26,9 @@ port of any running devbox container in your browser (ticket 004).
   publishing and it behaves the same on Linux, WSL and Docker Desktop.
   Requires a DevBox version with `devbox-net`; recreate older boxes
   (`./stop_dev_container.sh`, then start again).
+- **UI.** Lists all running containers; ones not from the devbox image or
+  not on `devbox-net` are red with the reason and can't be opened. Two
+  checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
 - **Security.** Published on `127.0.0.1` only. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to

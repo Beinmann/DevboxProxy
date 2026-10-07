@@ -23,8 +23,13 @@ LOOPBACK_ONLY = "127.0.0.2"
 
 def fake_docker():
     async def containers(request):
-        assert "my-dev-box-v2" in request.query["filters"]
-        return web.json_response([{"Names": ["/" + CONTAINER]}, {"Names": ["/" + LOOPBACK_ONLY]}])
+        net = {"NetworkSettings": {"Networks": {"devbox-net": {}}}}
+        boxes = [{"Id": "a", "Names": ["/" + CONTAINER], **net},
+                 {"Id": "b", "Names": ["/" + LOOPBACK_ONLY], **net},
+                 {"Id": "c", "Names": ["/nonet"], "NetworkSettings": {"Networks": {"bridge": {}}}}]
+        if "my-dev-box-v2" in request.query["filters"]:
+            return web.json_response(boxes)
+        return web.json_response(boxes + [{"Id": "d", "Names": ["/postgres"], **net}])
     a = web.Application()
     a.router.add_get("/containers/json", containers)
     return a
@@ -99,6 +104,22 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r.headers["Location"], f"http://3000.{CONTAINER}.localhost:{self.proxy.port}/")
         async with self.s.get(self.base + "/go?c=evil&port=3000", allow_redirects=False) as r:
             self.assertEqual(r.status, 400)
+
+    async def test_ui_flags_unusable_containers(self):
+        async with self.s.get(self.base + "/") as r:
+            html = await r.text()
+        self.assertIn("postgres", html)
+        self.assertIn("non-devbox image", html)
+        self.assertIn("not on devbox-net", html)
+        self.assertLess(html.index("<b>" + LOOPBACK_ONLY), html.index("<b>nonet"))  # usable first
+        self.assertEqual(html.count("action=/go"), 2)  # flagged rows have no Open form
+        async with self.s.get(self.base + "/?hide_nondevbox=1") as r:
+            self.assertNotIn("postgres</b>", await r.text())
+        async with self.s.get(self.base + "/?hide_nonet=1") as r:
+            self.assertNotIn("nonet</b>", await r.text())
+        for c in ("postgres", "nonet"):
+            async with self.s.get(self.base + f"/go?c={c}&port=3000", allow_redirects=False) as r:
+                self.assertEqual(r.status, 400)
 
     async def test_http_forwarding(self):
         async with self.s.get(self.base + "/a/b?x=1", headers={"Host": self.host}) as r:

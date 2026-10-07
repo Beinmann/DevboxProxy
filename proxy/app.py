@@ -6,6 +6,7 @@ proxy routes on the Host header, so absolute asset paths and websockets
 (HMR) work unchanged.
 """
 import asyncio
+import json
 import os
 from html import escape
 from urllib.parse import quote
@@ -15,6 +16,8 @@ from aiohttp import web
 
 DOCKER_API = os.environ.get("DOCKER_API", "http://docker-socket-proxy:2375")
 DEVBOX_IMAGE = os.environ.get("DEVBOX_IMAGE", "my-dev-box-v2")
+# Shared network the proxy reaches boxes on (resolved by container name).
+DEVBOX_NET = os.environ.get("DEVBOX_NET", "devbox-net")
 BASE_DOMAIN = os.environ.get("BASE_DOMAIN", "localhost")
 # Port the browser uses to reach us (the published host port), used when
 # building links. Falls back to the port in the request's Host header.
@@ -35,14 +38,31 @@ WS_SKIP = HOP_BY_HOP | {
 }
 
 
-async def list_devboxes(app):
-    """Names of running containers created from the devbox image."""
+async def _running(app, filters):
     url = f"{DOCKER_API}/containers/json"
-    params = {"filters": '{"ancestor":["%s"],"status":["running"]}' % DEVBOX_IMAGE}
-    async with app["docker"].get(url, params=params) as r:
+    async with app["docker"].get(url, params={"filters": json.dumps(filters)}) as r:
         r.raise_for_status()
-        data = await r.json()
-    return sorted(c["Names"][0].lstrip("/") for c in data if c.get("Names"))
+        return [c for c in await r.json() if c.get("Names")]
+
+
+async def list_containers(app):
+    """All running containers as dicts: name, devbox (created from the devbox
+    image) and on_net (attached to DEVBOX_NET). Usable ones are those with both."""
+    everything = await _running(app, {"status": ["running"]})
+    devbox_ids = {c["Id"] for c in await _running(
+        app, {"ancestor": [DEVBOX_IMAGE], "status": ["running"]})}
+    return sorted(
+        ({"name": c["Names"][0].lstrip("/"),
+          "devbox": c["Id"] in devbox_ids,
+          "on_net": DEVBOX_NET in (c.get("NetworkSettings") or {}).get("Networks", {})}
+         for c in everything),
+        key=lambda c: (not (c["devbox"] and c["on_net"]), c["name"]),
+    )
+
+
+async def list_devboxes(app):
+    """Names of running containers the proxy can serve."""
+    return [c["name"] for c in await list_containers(app) if c["devbox"] and c["on_net"]]
 
 
 def split_host(host_header):
@@ -71,28 +91,47 @@ PAGE = """<!doctype html><meta charset=utf-8>
 :root{{color-scheme:light dark;font-family:system-ui,sans-serif}}
 body{{max-width:40rem;margin:2rem auto;padding:0 1rem}}
 li{{margin:.6rem 0}} input{{width:6rem}}
-.err{{color:#c33}}
+.err,.bad{{color:#c33}} .bad small{{margin-left:.5rem}}
+form.f{{margin:1rem 0}} form.f label{{display:block}}
 </style>
 <h1>DevBox containers</h1>{body}"""
 
 
 async def index(request):
+    hide_nondevbox = "hide_nondevbox" in request.query
+    hide_nonet = "hide_nonet" in request.query
     try:
-        names = await list_devboxes(request.app)
+        containers = await list_containers(request.app)
     except Exception as e:  # docker socket proxy down, etc.
         body = f'<p class=err>Cannot reach Docker API: {escape(str(e))}</p>'
         return web.Response(text=PAGE.format(body=body), content_type="text/html", status=502)
-    if not names:
-        body = f"<p>No running containers from image <code>{escape(DEVBOX_IMAGE)}</code>.</p>"
-    else:
-        items = "".join(
-            f'<li><b>{escape(n)}</b> <form method=get action=/go style="display:inline">'
-            f'<input type=hidden name=c value="{escape(n)}">'
-            f'<input name=port type=number min=1 max=65535 placeholder=port required> '
-            f'<button>Open</button></form></li>'
-            for n in names
-        )
-        body = f"<ul>{items}</ul>"
+    controls = (
+        '<form class=f method=get>'
+        f'<label><input type=checkbox name=hide_nondevbox value=1 onchange="this.form.submit()"'
+        f'{" checked" if hide_nondevbox else ""}> hide non-devbox containers</label>'
+        f'<label><input type=checkbox name=hide_nonet value=1 onchange="this.form.submit()"'
+        f'{" checked" if hide_nonet else ""}> hide containers not on <code>{escape(DEVBOX_NET)}</code></label>'
+        '<noscript><button>Apply</button></noscript></form>'
+    )
+    items = []
+    for c in containers:
+        reasons = []
+        if not c["devbox"]:
+            reasons.append(f"non-devbox image (not {DEVBOX_IMAGE})")
+        if not c["on_net"]:
+            reasons.append(f"not on {DEVBOX_NET}")
+        if (hide_nondevbox and not c["devbox"]) or (hide_nonet and not c["on_net"]):
+            continue
+        n = escape(c["name"])
+        if reasons:
+            items.append(f'<li class=bad><b>{n}</b><small>{escape("; ".join(reasons))}</small></li>')
+        else:
+            items.append(
+                f'<li><b>{n}</b> <form method=get action=/go style="display:inline">'
+                f'<input type=hidden name=c value="{n}">'
+                f'<input name=port type=number min=1 max=65535 placeholder=port required> '
+                f'<button>Open</button></form></li>')
+    body = controls + (f"<ul>{''.join(items)}</ul>" if items else "<p>No matching running containers.</p>")
     return web.Response(text=PAGE.format(body=body), content_type="text/html")
 
 
