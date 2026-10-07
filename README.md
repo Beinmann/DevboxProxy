@@ -30,7 +30,14 @@ port of any running devbox container in your browser (ticket 004).
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
   `GET /containers`, never the raw socket.
-- The app in the container must listen on `0.0.0.0`, not just `127.0.0.1`.
+- **Loopback-only servers.** If the direct connect is refused (app bound to
+  `127.0.0.1` only), the proxy retries through the `connector` service,
+  which runs `docker exec <box> socat - TCP:127.0.0.1:<port>` so the
+  connection originates inside the container's network namespace. Needs
+  `socat` in the devbox image (add it, then rebuild/recreate the box). The
+  connector is the only component with the raw Docker socket; it is stdlib
+  only, reachable just on the internal network, and only ever runs that
+  one command in running containers of the devbox image.
 
 ## Known limitations
 
@@ -42,6 +49,7 @@ port of any running devbox container in your browser (ticket 004).
     python -m venv .venv && .venv/bin/pip install aiohttp
     .venv/bin/python -m unittest discover tests
 
-Covers routing, HTTP/POST/redirects, websockets and errors against a fake
+Covers routing, HTTP/POST/redirects, websockets, the loopback connector
+fallback and errors against a fake
 Docker API. The Docker packaging itself (compose, scripts) is untested —
 it was written in an environment without Docker.

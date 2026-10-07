@@ -20,6 +20,9 @@ BASE_DOMAIN = os.environ.get("BASE_DOMAIN", "localhost")
 # building links. Falls back to the port in the request's Host header.
 PUBLIC_PORT = os.environ.get("PUBLIC_PORT", "")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
+# host:port of the loopback connector (ticket 006); empty disables the
+# fallback for servers bound only to 127.0.0.1 inside the container.
+CONNECTOR = os.environ.get("CONNECTOR", "")
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -119,17 +122,64 @@ async def proxy(request, port, container):
     upstream = f"{container}:{port}"
     path = request.raw_path
     try:
-        if request.headers.get("Upgrade", "").lower() == "websocket":
-            return await proxy_ws(request, upstream, path)
-        return await proxy_http(request, upstream, path)
+        try:
+            return await forward(request, upstream, path)
+        except aiohttp.ClientConnectorError as e:
+            # Nothing on the container's eth0: the server may be bound to
+            # 127.0.0.1 only. Retry through the loopback connector.
+            if not (CONNECTOR and isinstance(e.os_error, ConnectionRefusedError)):
+                raise
+            local = await tunnel_port(request.app, container, port)
+            return await forward(request, f"127.0.0.1:{local}", path)
     except (aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as e:
         return web.Response(
             status=502,
             text=(f"Cannot reach {upstream}: {e}\n\n"
-                  "Is something listening on that port (bound to 0.0.0.0, not just "
-                  "127.0.0.1)? Is the proxy on the container's network "
-                  "(run ./connect_networks.sh)?"),
+                  "Is something listening on that port? Is the proxy on the "
+                  "container's network (devbox-net)? Servers bound to 127.0.0.1 "
+                  "need the connector and `socat` in the devbox image."),
         )
+
+
+async def forward(request, upstream, path):
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return await proxy_ws(request, upstream, path)
+    return await proxy_http(request, upstream, path)
+
+
+async def tunnel_port(app, container, port):
+    """Local 127.0.0.1 port whose connections reach 127.0.0.1:<port> inside
+    <container>, relayed through the connector. Created on first use."""
+    key = (container, port)
+    servers = app["tunnels"]
+    if key not in servers:
+        async def on_conn(r, w):
+            host, _, cport = CONNECTOR.rpartition(":")
+            try:
+                ur, uw = await asyncio.open_connection(host, int(cport))
+                uw.write(f"{container} {port}\n".encode())
+                await uw.drain()
+                if (await ur.readline()).strip() != b"OK":
+                    raise ConnectionError("connector refused")
+            except (OSError, ConnectionError):
+                w.close()
+                return
+            await asyncio.gather(relay(r, uw), relay(ur, w), return_exceptions=True)
+            w.close()
+            uw.close()
+        servers[key] = await asyncio.start_server(on_conn, "127.0.0.1", 0)
+    return servers[key].sockets[0].getsockname()[1]
+
+
+async def relay(src, dst):
+    try:
+        while data := await src.read(65536):
+            dst.write(data)
+            await dst.drain()
+        if dst.can_write_eof():
+            dst.write_eof()
+    except ConnectionError:
+        pass
 
 
 async def proxy_http(request, upstream, path):
@@ -206,6 +256,7 @@ async def router(request, handler):
 
 
 async def on_startup(app):
+    app["tunnels"] = {}
     app["docker"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
     # No decompression/redirects: pass bytes through untouched.
     app["upstream"] = aiohttp.ClientSession(
@@ -218,6 +269,8 @@ async def on_startup(app):
 async def on_cleanup(app):
     await app["docker"].close()
     await app["upstream"].close()
+    for srv in app["tunnels"].values():
+        srv.close()
 
 
 def make_app():

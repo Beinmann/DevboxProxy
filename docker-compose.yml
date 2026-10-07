@@ -14,14 +14,34 @@ services:
     networks: [internal]
     restart: "no"
 
+  # Runs `socat` inside a devbox so the proxy can reach servers bound to
+  # 127.0.0.1 (ticket 006). Holds the raw Docker socket, so it is kept tiny
+  # (stdlib only, see connector/connector.py), only reachable on `internal`,
+  # and can only run that one fixed command in devbox-image containers.
+  connector:
+    build: .
+    image: devbox-proxy
+    command: ["python", "/app/connector.py"]
+    user: root   # needs the docker socket
+    environment:
+      DEVBOX_IMAGE: ${DEVBOX_IMAGE:-my-dev-box-v2}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [internal]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
   devbox-proxy:
     build: .
     image: devbox-proxy
     container_name: devbox-proxy
-    depends_on: [docker-socket-proxy]
+    depends_on: [docker-socket-proxy, connector]
     environment:
       DOCKER_API: http://docker-socket-proxy:2375
       DEVBOX_IMAGE: ${DEVBOX_IMAGE:-my-dev-box-v2}
+      CONNECTOR: connector:8081
       PUBLIC_PORT: ${PROXY_PORT:-8080}
     ports:
       # Loopback only: the proxy forwards to anything in the devbox

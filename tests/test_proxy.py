@@ -3,6 +3,7 @@
 The fake container is named "127.0.0.1" so the proxy's name-based upstream
 lookup lands on localhost. Run: python -m unittest discover tests
 """
+import asyncio
 import os
 import sys
 import unittest
@@ -15,12 +16,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proxy"))
 import app as proxy_app  # noqa: E402
 
 CONTAINER = "127.0.0.1"
+# Direct connects to this name are refused (upstream listens on 127.0.0.1
+# only), which triggers the connector fallback.
+LOOPBACK_ONLY = "127.0.0.2"
 
 
 def fake_docker():
     async def containers(request):
         assert "my-dev-box-v2" in request.query["filters"]
-        return web.json_response([{"Names": ["/" + CONTAINER]}])
+        return web.json_response([{"Names": ["/" + CONTAINER]}, {"Names": ["/" + LOOPBACK_ONLY]}])
     a = web.Application()
     a.router.add_get("/containers/json", containers)
     return a
@@ -51,6 +55,21 @@ def fake_upstream():
     return a
 
 
+async def fake_connector_server(upstream_port):
+    """Speaks the connector protocol, relaying to 127.0.0.1:upstream_port."""
+    async def on_conn(r, w):
+        name, port = (await r.readline()).split()
+        if name.decode() != LOOPBACK_ONLY or int(port) != upstream_port:
+            w.write(b"ERR nope\n")
+            w.close()
+            return
+        w.write(b"OK\n")
+        ur, uw = await asyncio.open_connection("127.0.0.1", upstream_port)
+        await asyncio.gather(proxy_app.relay(r, uw), proxy_app.relay(ur, w))
+        w.close()
+    return await asyncio.start_server(on_conn, "127.0.0.1", 0)
+
+
 class ProxyTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.docker = TestServer(fake_docker())
@@ -58,6 +77,8 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         await self.docker.start_server()
         await self.up.start_server()
         proxy_app.DOCKER_API = f"http://127.0.0.1:{self.docker.port}"
+        self.connector = await fake_connector_server(self.up.port)
+        proxy_app.CONNECTOR = f"127.0.0.1:{self.connector.sockets[0].getsockname()[1]}"
         self.proxy = TestServer(proxy_app.make_app())
         await self.proxy.start_server()
         self.s = aiohttp.ClientSession()
@@ -66,6 +87,7 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.s.close()
+        self.connector.close()
         for srv in (self.proxy, self.up, self.docker):
             await srv.close()
 
@@ -94,6 +116,22 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         async with self.s.ws_connect(self.base + "/ws", headers={"Host": self.host}) as ws:
             await ws.send_str("hi")
             self.assertEqual((await ws.receive()).data, "echo:hi")
+
+    async def test_loopback_only_via_connector(self):
+        host = f"{self.up.port}.{LOOPBACK_ONLY}.localhost:{self.proxy.port}"
+        async with self.s.post(self.base + "/post", data=b"x" * 200000, headers={"Host": host}) as r:
+            self.assertEqual((r.status, len(await r.read())), (201, 200000))
+        async with self.s.get(self.base + "/a", headers={"Host": host}) as r:
+            self.assertEqual((await r.json())["path"], "/a")
+        async with self.s.ws_connect(self.base + "/ws", headers={"Host": host}) as ws:
+            await ws.send_str("hi")
+            self.assertEqual((await ws.receive()).data, "echo:hi")
+
+    async def test_refused_without_connector_is_502(self):
+        proxy_app.CONNECTOR = ""
+        host = f"{self.up.port}.{LOOPBACK_ONLY}.localhost"
+        async with self.s.get(self.base + "/", headers={"Host": host}) as r:
+            self.assertEqual(r.status, 502)
 
     async def test_unknown_container_and_dead_port(self):
         async with self.s.get(self.base + "/", headers={"Host": f"80.nope.localhost:{self.proxy.port}"}) as r:
