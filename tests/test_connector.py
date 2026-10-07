@@ -19,6 +19,7 @@ class FakeDocker:
     def __init__(self):
         self.exec_body = None
         self.stdin = b""
+        self.exec_info = {"Running": True, "ExitCode": None}
 
     async def handle(self, r, w):
         head = (await r.readuntil(b"\r\n\r\n")).decode()
@@ -36,6 +37,8 @@ class FakeDocker:
         elif "POST /containers/box/exec" in line:
             self.exec_body = body
             reply("201 Created", {"Id": "abc"})
+        elif line.startswith("GET /exec/abc/json"):
+            reply("200 OK", self.exec_info)
         elif "POST /exec/abc/start" in line:
             assert "Upgrade: tcp" in head
             w.write(b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
@@ -77,6 +80,11 @@ class ConnectorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(r.read(), 5), b"hello|bye")
         self.assertEqual(self.fake.stdin, b"GET /")
         self.assertEqual(self.fake.exec_body["Cmd"], ["socat", "-", "TCP:127.0.0.1:3000"])
+
+    async def test_failed_exec_start_is_reported(self):
+        self.fake.exec_info = {"Running": False, "ExitCode": 127}
+        r, w = await self.talk(b"box 3000\n")
+        self.assertTrue((await r.readline()).startswith(b"ERR exec exited 127"))
 
     async def test_rejects_bad_input_and_unknown_container(self):
         for first in (b"box notaport\n", b"../x 80\n", b"box 99999\n", b"just-one\n"):

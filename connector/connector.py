@@ -130,6 +130,13 @@ async def handle(creader, cwriter):
         if status not in (101, 200):
             cwriter.write(b"ERR exec start failed\n")
             return
+        # A failed start (e.g. socat missing) shows up as a non-running exec
+        # with a non-zero exit code; report it instead of relaying Docker's
+        # error text as if it were the upstream's response.
+        status, info = await docker_json("GET", f"/exec/{exe['Id']}/json")
+        if status == 200 and not info.get("Running") and info.get("ExitCode"):
+            cwriter.write(f"ERR exec exited {info['ExitCode']} (is socat installed in the box?)\n".encode())
+            return
         cwriter.write(b"OK\n")
         await cwriter.drain()
         tasks = [asyncio.ensure_future(pump_from_docker(dreader, cwriter)),

@@ -127,6 +127,16 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
             await ws.send_str("hi")
             self.assertEqual((await ws.receive()).data, "echo:hi")
 
+    async def test_garbage_from_upstream_is_502(self):
+        async def junk(r, w):
+            w.write(b"OCI runtime exec failed: nope\n")
+            w.close()
+        srv = await asyncio.start_server(junk, "127.0.0.1", 0)
+        port = srv.sockets[0].getsockname()[1]
+        async with self.s.get(self.base + "/", headers={"Host": f"{port}.{CONTAINER}.localhost"}) as r:
+            self.assertEqual(r.status, 502)
+        srv.close()
+
     async def test_refused_without_connector_is_502(self):
         proxy_app.CONNECTOR = ""
         host = f"{self.up.port}.{LOOPBACK_ONLY}.localhost"

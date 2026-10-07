@@ -131,7 +131,7 @@ async def proxy(request, port, container):
                 raise
             local = await tunnel_port(request.app, container, port)
             return await forward(request, f"127.0.0.1:{local}", path)
-    except (aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
         return web.Response(
             status=502,
             text=(f"Cannot reach {upstream}: {e}\n\n"
