@@ -1,0 +1,233 @@
+"""DevBox port proxy.
+
+UI at http://localhost:<port>/ lists running devbox containers. An app on
+port P in container C is reachable at http://P.C.localhost:<port>/ — the
+proxy routes on the Host header, so absolute asset paths and websockets
+(HMR) work unchanged.
+"""
+import asyncio
+import os
+from html import escape
+from urllib.parse import quote
+
+import aiohttp
+from aiohttp import web
+
+DOCKER_API = os.environ.get("DOCKER_API", "http://docker-socket-proxy:2375")
+DEVBOX_IMAGE = os.environ.get("DEVBOX_IMAGE", "my-dev-box-v2")
+BASE_DOMAIN = os.environ.get("BASE_DOMAIN", "localhost")
+# Port the browser uses to reach us (the published host port), used when
+# building links. Falls back to the port in the request's Host header.
+PUBLIC_PORT = os.environ.get("PUBLIC_PORT", "")
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
+
+HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+}
+# Handled by aiohttp itself on the websocket bridge.
+WS_SKIP = HOP_BY_HOP | {
+    "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
+    "sec-websocket-accept", "host", "content-length",
+}
+
+
+async def list_devboxes(app):
+    """Names of running containers created from the devbox image."""
+    url = f"{DOCKER_API}/containers/json"
+    params = {"filters": '{"ancestor":["%s"],"status":["running"]}' % DEVBOX_IMAGE}
+    async with app["docker"].get(url, params=params) as r:
+        r.raise_for_status()
+        data = await r.json()
+    return sorted(c["Names"][0].lstrip("/") for c in data if c.get("Names"))
+
+
+def split_host(host_header):
+    host, _, port = host_header.partition(":")
+    return host.lower(), port
+
+
+def parse_target(host):
+    """'3000.my-box.localhost' -> (3000, 'my-box'); None if not a proxy host."""
+    suffix = "." + BASE_DOMAIN
+    if not host.endswith(suffix):
+        return None
+    labels = host[: -len(suffix)].split(".")
+    if len(labels) < 2 or not labels[0].isdigit():
+        return None
+    port = int(labels[0])
+    if not 1 <= port <= 65535:
+        return None
+    return port, ".".join(labels[1:])
+
+
+PAGE = """<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>DevBox proxy</title>
+<style>
+:root{{color-scheme:light dark;font-family:system-ui,sans-serif}}
+body{{max-width:40rem;margin:2rem auto;padding:0 1rem}}
+li{{margin:.6rem 0}} input{{width:6rem}}
+.err{{color:#c33}}
+</style>
+<h1>DevBox containers</h1>{body}"""
+
+
+async def index(request):
+    try:
+        names = await list_devboxes(request.app)
+    except Exception as e:  # docker socket proxy down, etc.
+        body = f'<p class=err>Cannot reach Docker API: {escape(str(e))}</p>'
+        return web.Response(text=PAGE.format(body=body), content_type="text/html", status=502)
+    if not names:
+        body = f"<p>No running containers from image <code>{escape(DEVBOX_IMAGE)}</code>.</p>"
+    else:
+        items = "".join(
+            f'<li><b>{escape(n)}</b> <form method=get action=/go style="display:inline">'
+            f'<input type=hidden name=c value="{escape(n)}">'
+            f'<input name=port type=number min=1 max=65535 placeholder=port required> '
+            f'<button>Open</button></form></li>'
+            for n in names
+        )
+        body = f"<ul>{items}</ul>"
+    return web.Response(text=PAGE.format(body=body), content_type="text/html")
+
+
+async def go(request):
+    c = request.query.get("c", "")
+    port = request.query.get("port", "")
+    if not port.isdigit() or not c or c not in await list_devboxes(request.app):
+        raise web.HTTPBadRequest(text="unknown container or bad port")
+    _, public = split_host(request.headers.get("Host", ""))
+    public = PUBLIC_PORT or public
+    suffix = f":{public}" if public else ""
+    raise web.HTTPFound(f"http://{int(port)}.{quote(c)}.{BASE_DOMAIN}{suffix}/")
+
+
+def forward_headers(request, skip):
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+    peer = request.transport.get_extra_info("peername")
+    headers["X-Forwarded-For"] = peer[0] if peer else ""
+    headers["X-Forwarded-Host"] = request.headers.get("Host", "")
+    headers["X-Forwarded-Proto"] = request.scheme
+    return headers
+
+
+async def proxy(request, port, container):
+    if container not in await list_devboxes(request.app):
+        return web.Response(status=404, text=f"No running devbox container named {container!r}.")
+    upstream = f"{container}:{port}"
+    path = request.raw_path
+    try:
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return await proxy_ws(request, upstream, path)
+        return await proxy_http(request, upstream, path)
+    except (aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError) as e:
+        return web.Response(
+            status=502,
+            text=(f"Cannot reach {upstream}: {e}\n\n"
+                  "Is something listening on that port (bound to 0.0.0.0, not just "
+                  "127.0.0.1)? Is the proxy on the container's network "
+                  "(run ./connect_networks.sh)?"),
+        )
+
+
+async def proxy_http(request, upstream, path):
+    session = request.app["upstream"]
+    has_body = request.can_read_body
+    async with session.request(
+        request.method,
+        f"http://{upstream}{path}",
+        headers=forward_headers(request, HOP_BY_HOP),
+        data=request.content if has_body else None,
+        allow_redirects=False,
+    ) as r:
+        resp = web.StreamResponse(status=r.status, reason=r.reason)
+        for k, v in r.headers.items():
+            if k.lower() not in HOP_BY_HOP and k.lower() != "content-length":
+                resp.headers.add(k, v)
+        # Content-Length is kept for non-chunked bodies so browsers show progress.
+        if "Content-Length" in r.headers and r.headers.get("Transfer-Encoding") is None:
+            resp.content_length = int(r.headers["Content-Length"])
+        await resp.prepare(request)
+        async for chunk in r.content.iter_any():
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+
+async def proxy_ws(request, upstream, path):
+    session = request.app["upstream"]
+    protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
+    async with session.ws_connect(
+        f"http://{upstream}{path}",
+        headers=forward_headers(request, WS_SKIP),
+        protocols=protocols,
+        max_msg_size=0,
+        autoclose=False,
+        autoping=False,
+    ) as up:
+        down = web.WebSocketResponse(protocols=[up.protocol] if up.protocol else (), max_msg_size=0,
+                                     autoclose=False, autoping=False)
+        await down.prepare(request)
+
+        async def pump(src, dst):
+            async for msg in src:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await dst.send_str(msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await dst.send_bytes(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PING:
+                    await dst.ping(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PONG:
+                    await dst.pong(msg.data)
+                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
+                    break
+            if not dst.closed:
+                await dst.close()
+
+        tasks = [asyncio.ensure_future(pump(up, down)), asyncio.ensure_future(pump(down, up))]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return down
+
+
+@web.middleware
+async def router(request, handler):
+    host, _ = split_host(request.headers.get("Host", ""))
+    target = parse_target(host)
+    if target:
+        return await proxy(request, *target)
+    return await handler(request)
+
+
+async def on_startup(app):
+    app["docker"] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+    # No decompression/redirects: pass bytes through untouched.
+    app["upstream"] = aiohttp.ClientSession(
+        auto_decompress=False,
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
+        cookie_jar=aiohttp.DummyCookieJar(),
+    )
+
+
+async def on_cleanup(app):
+    await app["docker"].close()
+    await app["upstream"].close()
+
+
+def make_app():
+    app = web.Application(middlewares=[router], client_max_size=0)
+    app.router.add_get("/", index)
+    app.router.add_get("/go", go)
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    return app
+
+
+if __name__ == "__main__":
+    web.run_app(make_app(), host="0.0.0.0", port=LISTEN_PORT)

@@ -1,0 +1,35 @@
+# Start via ./start_proxy.sh — do not call `docker compose` directly (same
+# guard as DevBox's compose file).
+x-require-wrapper: "${DEVBOX_PROXY_WRAPPER:?Use ./start_proxy.sh instead of calling docker compose directly}"
+
+services:
+  # Read-only, containers-only view of the Docker API. The proxy never gets
+  # the raw socket, so a bug in it can't create/exec/stop containers.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1   # GET /containers/json only; POST etc. stay off
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [internal]
+    restart: "no"
+
+  devbox-proxy:
+    build: .
+    image: devbox-proxy
+    container_name: devbox-proxy   # fixed name: connect_networks.sh targets it
+    depends_on: [docker-socket-proxy]
+    environment:
+      DOCKER_API: http://docker-socket-proxy:2375
+      DEVBOX_IMAGE: ${DEVBOX_IMAGE:-my-dev-box-v2}
+      PUBLIC_PORT: ${PROXY_PORT:-8080}
+    ports:
+      # Loopback only: the proxy forwards to anything in the devbox
+      # containers, so it must not be reachable from the LAN.
+      - "127.0.0.1:${PROXY_PORT:-8080}:8080"
+    networks: [internal, default]
+    restart: "no"
+
+networks:
+  internal:
+    internal: true

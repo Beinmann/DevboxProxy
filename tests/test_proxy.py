@@ -1,0 +1,106 @@
+"""End-to-end test with a fake Docker API and a fake upstream app.
+
+The fake container is named "127.0.0.1" so the proxy's name-based upstream
+lookup lands on localhost. Run: python -m unittest discover tests
+"""
+import os
+import sys
+import unittest
+
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proxy"))
+import app as proxy_app  # noqa: E402
+
+CONTAINER = "127.0.0.1"
+
+
+def fake_docker():
+    async def containers(request):
+        assert "my-dev-box-v2" in request.query["filters"]
+        return web.json_response([{"Names": ["/" + CONTAINER]}])
+    a = web.Application()
+    a.router.add_get("/containers/json", containers)
+    return a
+
+
+def fake_upstream():
+    async def hello(request):
+        return web.json_response({"path": request.raw_path, "host": request.headers["Host"],
+                                  "xfh": request.headers["X-Forwarded-Host"]})
+
+    async def post(request):
+        return web.Response(body=await request.read(), status=201, headers={"X-T": "1"})
+
+    async def redirect(request):
+        raise web.HTTPFound("/elsewhere")
+
+    async def ws(request):
+        w = web.WebSocketResponse()
+        await w.prepare(request)
+        async for m in w:
+            await w.send_str("echo:" + m.data)
+        return w
+    a = web.Application()
+    a.router.add_get("/ws", ws)
+    a.router.add_get("/redir", redirect)
+    a.router.add_post("/post", post)
+    a.router.add_get("/{tail:.*}", hello)
+    return a
+
+
+class ProxyTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.docker = TestServer(fake_docker())
+        self.up = TestServer(fake_upstream())
+        await self.docker.start_server()
+        await self.up.start_server()
+        proxy_app.DOCKER_API = f"http://127.0.0.1:{self.docker.port}"
+        self.proxy = TestServer(proxy_app.make_app())
+        await self.proxy.start_server()
+        self.s = aiohttp.ClientSession()
+        self.base = f"http://127.0.0.1:{self.proxy.port}"
+        self.host = f"{self.up.port}.{CONTAINER}.localhost:{self.proxy.port}"
+
+    async def asyncTearDown(self):
+        await self.s.close()
+        for srv in (self.proxy, self.up, self.docker):
+            await srv.close()
+
+    async def test_ui_lists_and_redirects(self):
+        async with self.s.get(self.base + "/") as r:
+            self.assertIn(CONTAINER, await r.text())
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port=3000", allow_redirects=False) as r:
+            self.assertEqual(r.status, 302)
+            self.assertEqual(r.headers["Location"], f"http://3000.{CONTAINER}.localhost:{self.proxy.port}/")
+        async with self.s.get(self.base + "/go?c=evil&port=3000", allow_redirects=False) as r:
+            self.assertEqual(r.status, 400)
+
+    async def test_http_forwarding(self):
+        async with self.s.get(self.base + "/a/b?x=1", headers={"Host": self.host}) as r:
+            j = await r.json()
+        self.assertEqual(j["path"], "/a/b?x=1")
+        self.assertEqual(j["host"], self.host)
+
+    async def test_post_and_redirect_passthrough(self):
+        async with self.s.post(self.base + "/post", data=b"payload", headers={"Host": self.host}) as r:
+            self.assertEqual((r.status, await r.read(), r.headers["X-T"]), (201, b"payload", "1"))
+        async with self.s.get(self.base + "/redir", headers={"Host": self.host}, allow_redirects=False) as r:
+            self.assertEqual((r.status, r.headers["Location"]), (302, "/elsewhere"))
+
+    async def test_websocket(self):
+        async with self.s.ws_connect(self.base + "/ws", headers={"Host": self.host}) as ws:
+            await ws.send_str("hi")
+            self.assertEqual((await ws.receive()).data, "echo:hi")
+
+    async def test_unknown_container_and_dead_port(self):
+        async with self.s.get(self.base + "/", headers={"Host": f"80.nope.localhost:{self.proxy.port}"}) as r:
+            self.assertEqual(r.status, 404)
+        async with self.s.get(self.base + "/", headers={"Host": f"1.{CONTAINER}.localhost"}) as r:
+            self.assertEqual(r.status, 502)
+
+
+if __name__ == "__main__":
+    unittest.main()
