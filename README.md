@@ -29,7 +29,12 @@ port of any running devbox container in your browser (ticket 004).
 - **UI.** Lists all running containers; ones not from the devbox image or
   not on `devbox-net` are red with the reason and can't be opened. Two
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
-- **Security.** Published on `127.0.0.1` only. The proxy only forwards to
+- **Security.** Published on `127.0.0.1` only (compose binds
+  `127.0.0.1:${PROXY_PORT:-8080}`; don't widen it). Requests that look
+  cross-site are rejected with 403: `Sec-Fetch-Site: cross-site`, or an
+  `Origin` that isn't the UI/a proxy host on the same port — so other
+  websites can't reach boxes via `*.localhost`. Requests with neither header
+  (curl, old browsers) are allowed. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
   `GET /containers`, never the raw socket.

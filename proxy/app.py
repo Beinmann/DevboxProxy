@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -285,8 +285,32 @@ async def proxy_ws(request, upstream, path):
         return down
 
 
+def cross_site_reason(request):
+    """Why this request looks like it was triggered by another website, or
+    None. Requests without Sec-Fetch-Site/Origin (curl, old browsers) pass:
+    they can't be told apart from the user's own tools."""
+    if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+        return "cross-site request"
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        # Origin must be the UI or a proxy host on the port we are served on.
+        try:
+            parts = urlsplit(origin)
+            o_host, o_port = (parts.hostname or "").lower(), parts.port
+        except ValueError:
+            return "bad Origin"
+        _, port = split_host(request.headers.get("Host", ""))
+        same_port = (str(o_port) if o_port else "") == port
+        if not (same_port and (o_host == BASE_DOMAIN or parse_target(o_host))):
+            return f"foreign Origin {origin!r}"
+    return None
+
+
 @web.middleware
 async def router(request, handler):
+    reason = cross_site_reason(request)
+    if reason:
+        return web.Response(status=403, text=f"Forbidden: {reason}.")
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:
