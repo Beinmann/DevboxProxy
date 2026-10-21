@@ -364,44 +364,8 @@ async def proxy_ws(request, upstream, path):
         return down
 
 
-def cross_site_reason(request):
-    """Why this request looks like it was triggered by another website, or
-    None. Requests without Sec-Fetch-Site/Origin (curl, old browsers) pass:
-    they can't be told apart from the user's own tools.
-
-    The one exception is the token handoff: the UI (localhost) and a port
-    host (*.localhost) are different sites, so clicking "Open" is a
-    cross-site top-level navigation. It's allowed on HANDOFF_PATH only,
-    which needs a valid signed token anyway."""
-    h = request.headers
-    handoff_nav = (request.method == "GET" and request.path == HANDOFF_PATH
-                   and h.get("Sec-Fetch-Mode", "").lower() == "navigate"
-                   and h.get("Sec-Fetch-Dest", "").lower() == "document")
-    if h.get("Sec-Fetch-Site", "").lower() == "cross-site" and not handoff_nav:
-        return "cross-site request"
-    origin = request.headers.get("Origin")
-    if origin is not None:
-        # Origin must be the UI or a proxy host on the port we are served on.
-        try:
-            parts = urlsplit(origin)
-            o_host, o_port = (parts.hostname or "").lower(), parts.port
-        except ValueError:
-            return "bad Origin"
-        _, port = split_host(request.headers.get("Host", ""))
-        same_port = (str(o_port) if o_port else "") == port
-        if not (same_port and (o_host == BASE_DOMAIN or parse_target(o_host))):
-            return f"foreign Origin {origin!r}"
-    return None
-
-
 @web.middleware
 async def router(request, handler):
-    reason = cross_site_reason(request)
-    if reason:
-        seen = {k: v for k, v in request.headers.items()
-                if k.lower().startswith("sec-fetch-") or k.lower() == "origin"}
-        print(f"403 {request.method} {request.path} Host={request.headers.get('Host')} {seen}", flush=True)
-        return web.Response(status=403, text=f"Forbidden: {reason}.\n{request.method} {request.path} {seen}")
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:

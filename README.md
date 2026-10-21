@@ -47,13 +47,7 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
 - **Security.** Published on `127.0.0.1` only (compose binds
   `${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-4242}`; only `--host` widens it,
-  see below). Requests that look
-  cross-site are rejected with 403: `Sec-Fetch-Site: cross-site`, or an
-  `Origin` that isn't the UI/a proxy host on the same port — so other
-  websites can't reach boxes via `*.localhost`. (Exception: the UI's "Open"
-  link is a cross-site top-level navigation, allowed on the token handoff
-  path only.) Requests with neither header
-  (curl, old browsers) are allowed. The proxy only forwards to
+  see below). Access to the UI and to ports is token-protected. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
   `GET /containers`, never the raw socket.
