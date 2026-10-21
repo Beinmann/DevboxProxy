@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from html import escape
 from http.cookies import SimpleCookie
@@ -80,11 +81,19 @@ def split_host(host_header):
     return host.lower(), port
 
 
+NIP_RE = re.compile(r"\.\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\.nip\.io$")
+
+
 def parse_target(host):
-    """'3000.my-box.localhost' -> (3000, 'my-box'); None if not a proxy host."""
+    """'3000.my-box.localhost' -> (3000, 'my-box'); None if not a proxy host.
+    With the default BASE_DOMAIN, '3000.my-box.<ip>.nip.io' works too (what
+    the UI links to when it was opened via an IP address)."""
     suffix = "." + BASE_DOMAIN
     if not host.endswith(suffix):
-        return None
+        m = NIP_RE.search(host) if BASE_DOMAIN == "localhost" else None
+        if not m:
+            return None
+        suffix = m.group(0)
     labels = host[: -len(suffix)].split(".")
     if len(labels) < 2 or not labels[0].isdigit():
         return None
@@ -209,7 +218,11 @@ async def go(request):
     _, public = split_host(request.headers.get("Host", ""))
     public = PUBLIC_PORT or public
     suffix = f":{public}" if public else ""
-    host = f"{int(port)}.{quote(c)}.{BASE_DOMAIN}"
+    domain = BASE_DOMAIN
+    ui_host, _ = split_host(request.headers.get("Host", ""))
+    if domain == "localhost" and re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ui_host):
+        domain = f"{ui_host}.nip.io"  # *.localhost wouldn't reach this machine
+    host = f"{int(port)}.{quote(c)}.{domain}"
     url = f"http://{host}{suffix}/"
     if TOKEN:
         # Cookies can't be shared across *.localhost (public suffix), so hand

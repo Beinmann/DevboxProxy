@@ -85,6 +85,9 @@ that resolves to the host (e.g. `<host-ip>.nip.io`, or your own
 `http://<port>.<container>.<BASE_DOMAIN>:<port>/`. Open the UI via a
 name under that domain too, or via the IP.
 
+If `BASE_DOMAIN` is left at its default and you open the UI via an IPv4
+address, the Open links automatically use `<that-ip>.nip.io`.
+
 ## Known limitations
 
 - Boxes share `devbox-net`, so they can reach each other too.
