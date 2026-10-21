@@ -125,6 +125,9 @@ def set_session(resp, host):
     resp.set_cookie(COOKIE, session_value(host), httponly=True, samesite="Lax", path="/")
 
 
+HANDOFF_PAGE = ('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content="0;url=/">'
+                '<script>location.replace("/")</script><a href="/">Continue</a>')
+
 LOGIN = """<!doctype html><meta charset=utf-8>
 <title>DevBox proxy: login</title>
 <style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}
@@ -404,9 +407,12 @@ async def router(request, handler):
     if target:
         if TOKEN and not authenticated(request, host):
             if request.path == HANDOFF_PATH and handoff_valid(host, request.query.get("t", "")):
-                resp = web.HTTPFound("/")
+                # Not a 302: a browser keeps the cross-site initiator across
+                # redirects, so "/" would be rejected too. A page that
+                # navigates itself makes the next request same-origin.
+                resp = web.Response(text=HANDOFF_PAGE, content_type="text/html")
                 set_session(resp, host)
-                raise resp
+                return resp
             return web.Response(
                 status=401,
                 text="Unauthorized. Open the DevBox proxy UI, log in and use it to open this port.")

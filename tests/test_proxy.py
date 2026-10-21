@@ -249,7 +249,7 @@ class AuthTest(ProxyBase):
                "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
         url = f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}"
         async with self.s.get(url, headers=nav, allow_redirects=False) as r:
-            self.assertEqual(r.status, 302)
+            self.assertEqual(r.status, 200)
         for bad in ({"Sec-Fetch-Mode": "cors"}, {"Sec-Fetch-Dest": "image"},
                     {"Origin": "https://evil.example"}):
             async with self.s.get(url, headers={**nav, **bad}, allow_redirects=False) as r:
@@ -270,7 +270,8 @@ class AuthTest(ProxyBase):
             h = {"Host": f"{host}:{self.proxy.port}"}
             async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}", headers=h,
                                  allow_redirects=False) as r:
-                self.assertEqual((r.status, r.headers["Location"]), (302, "/"))
+                self.assertEqual(r.status, 200)
+                self.assertIn('url=/', await r.text())
             self.assertIn(proxy_app.COOKIE, r.cookies)
             cookie = {proxy_app.COOKIE: r.cookies[proxy_app.COOKIE].value}
             async with fresh.get(self.base + "/a", headers={**h, "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}; other=1"}) as r:
