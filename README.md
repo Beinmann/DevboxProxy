@@ -61,3 +61,7 @@ port of any running devbox container in your browser.
 Covers routing, HTTP/POST/redirects, websockets, the loopback connector
 fallback and errors against a fake Docker API. The Docker packaging
 (compose, scripts) is not covered by the tests.
+
+## License
+
+[MIT](LICENSE).
