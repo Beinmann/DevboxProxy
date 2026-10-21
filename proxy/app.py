@@ -6,9 +6,13 @@ proxy routes on the Host header, so absolute asset paths and websockets
 (HMR) work unchanged.
 """
 import asyncio
+import hashlib
+import hmac
 import json
 import os
+import time
 from html import escape
+from http.cookies import SimpleCookie
 from urllib.parse import quote, urlsplit
 
 import aiohttp
@@ -26,6 +30,12 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
 # host:port of the loopback connector; empty disables the
 # fallback for servers bound only to 127.0.0.1 inside the container.
 CONNECTOR = os.environ.get("CONNECTOR", "")
+
+# Shared secret (ticket 012). Empty disables authentication.
+TOKEN = os.environ.get("PROXY_TOKEN", "")
+COOKIE = "devbox_proxy_auth"
+HANDOFF_PATH = "/__devbox_auth"
+HANDOFF_TTL = 60
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -82,6 +92,59 @@ def parse_target(host):
     if not 1 <= port <= 65535:
         return None
     return port, ".".join(labels[1:])
+
+
+def _sig(*parts):
+    return hmac.new(TOKEN.encode(), ":".join(parts).encode(), hashlib.sha256).hexdigest()
+
+
+def session_value(host):
+    """Cookie value valid for exactly one host; cookies are host-only, so a
+    box app on one subdomain can't read or replay another's."""
+    return _sig("session", host)
+
+
+def handoff_value(host, now=None):
+    exp = str(int((now or time.time()) + HANDOFF_TTL))
+    return f"{exp}.{_sig('handoff', host, exp)}"
+
+
+def handoff_valid(host, value, now=None):
+    exp, _, sig = value.partition(".")
+    return (exp.isdigit() and int(exp) >= (now or time.time())
+            and hmac.compare_digest(sig, _sig("handoff", host, exp)))
+
+
+def authenticated(request, host):
+    if not TOKEN:
+        return True
+    return hmac.compare_digest(request.cookies.get(COOKIE, ""), session_value(host))
+
+
+def set_session(resp, host):
+    resp.set_cookie(COOKIE, session_value(host), httponly=True, samesite="Lax", path="/")
+
+
+LOGIN = """<!doctype html><meta charset=utf-8>
+<title>DevBox proxy: login</title>
+<style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}
+body{max-width:24rem;margin:3rem auto;padding:0 1rem}.err{color:#c33}</style>
+<h1>DevBox proxy</h1>%s
+<form method=post action=/login>
+<input type=password name=token placeholder="proxy token" autofocus required>
+<button>Log in</button></form>"""
+
+
+async def login(request):
+    form = await request.post()
+    given = str(form.get("token", ""))
+    if not TOKEN or not hmac.compare_digest(_sig("login", given), _sig("login", TOKEN)):
+        return web.Response(text=LOGIN % "<p class=err>Wrong token.</p>",
+                            content_type="text/html", status=401)
+    host, _ = split_host(request.headers.get("Host", ""))
+    resp = web.HTTPSeeOther("/")
+    set_session(resp, host)
+    raise resp
 
 
 PAGE = """<!doctype html><meta charset=utf-8>
@@ -143,7 +206,13 @@ async def go(request):
     _, public = split_host(request.headers.get("Host", ""))
     public = PUBLIC_PORT or public
     suffix = f":{public}" if public else ""
-    raise web.HTTPFound(f"http://{int(port)}.{quote(c)}.{BASE_DOMAIN}{suffix}/")
+    host = f"{int(port)}.{quote(c)}.{BASE_DOMAIN}"
+    url = f"http://{host}{suffix}/"
+    if TOKEN:
+        # Cookies can't be shared across *.localhost (public suffix), so hand
+        # the browser a short-lived signed link that sets a per-host cookie.
+        url = f"http://{host}{suffix}{HANDOFF_PATH}?t={handoff_value(host)}"
+    raise web.HTTPFound(url)
 
 
 def forward_headers(request, skip):
@@ -152,6 +221,13 @@ def forward_headers(request, skip):
     headers["X-Forwarded-For"] = peer[0] if peer else ""
     headers["X-Forwarded-Host"] = request.headers.get("Host", "")
     headers["X-Forwarded-Proto"] = request.scheme
+    if TOKEN and "Cookie" in headers:  # don't leak our session cookie to apps
+        jar = SimpleCookie()
+        jar.load(headers["Cookie"])
+        jar.pop(COOKIE, None)
+        headers["Cookie"] = "; ".join(f"{m.key}={m.value}" for m in jar.values())
+        if not headers["Cookie"]:
+            del headers["Cookie"]
     return headers
 
 
@@ -314,7 +390,19 @@ async def router(request, handler):
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:
+        if TOKEN and not authenticated(request, host):
+            if request.path == HANDOFF_PATH and handoff_valid(host, request.query.get("t", "")):
+                resp = web.HTTPFound("/")
+                set_session(resp, host)
+                raise resp
+            return web.Response(
+                status=401,
+                text="Unauthorized. Open the DevBox proxy UI, log in and use it to open this port.")
         return await proxy(request, *target)
+    if request.path == "/login" and request.method == "POST":
+        return await handler(request)
+    if not authenticated(request, host):
+        return web.Response(text=LOGIN % "", content_type="text/html", status=401)
     return await handler(request)
 
 
@@ -340,10 +428,13 @@ def make_app():
     app = web.Application(middlewares=[router], client_max_size=0)
     app.router.add_get("/", index)
     app.router.add_get("/go", go)
+    app.router.add_post("/login", login)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
 
 
 if __name__ == "__main__":
+    if not TOKEN:
+        print("WARNING: PROXY_TOKEN is empty, authentication is disabled", flush=True)
     web.run_app(make_app(), host="0.0.0.0", port=LISTEN_PORT)

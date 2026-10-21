@@ -42,6 +42,7 @@ services:
       DOCKER_API: http://docker-socket-proxy:2375
       DEVBOX_IMAGE: ${DEVBOX_IMAGE:-my-dev-box-v2}
       CONNECTOR: connector:8081
+      PROXY_TOKEN: ${PROXY_TOKEN:-}
       PUBLIC_PORT: ${PROXY_PORT:-8080}
     ports:
       # Loopback only: the proxy forwards to anything in the devbox

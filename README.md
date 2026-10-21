@@ -12,6 +12,21 @@ port of any running devbox container in your browser.
 
 `PROXY_PORT=9000 ./start_proxy.sh` changes the host port.
 
+## Access token
+
+Every request (UI and proxied hosts, websockets included) needs a shared
+token. `start_proxy.sh` uses `$PROXY_TOKEN` if set, otherwise generates a
+random one on first start and keeps it in `./.proxy_token` (mode 600,
+gitignored); it prints only the first 4 characters. Retrieve it with
+`cat .proxy_token`; rotate by deleting the file and restarting.
+
+Open the UI, paste the token into the login form. **Open** then redirects to
+the app host via a signed link valid for 60 s that sets a cookie for that
+one host (`*.localhost` can't share a cookie across subdomains), so
+websockets work too. The cookie is HttpOnly, host-bound, and not forwarded
+to the apps. An empty `PROXY_TOKEN` inside the container disables auth
+(warning at startup).
+
 ## How it works
 
 - **Host-based routing.** `*.localhost` resolves to 127.0.0.1 in Chrome and
