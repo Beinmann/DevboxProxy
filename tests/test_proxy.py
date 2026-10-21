@@ -75,7 +75,7 @@ async def fake_connector_server(upstream_port):
     return await asyncio.start_server(on_conn, "127.0.0.1", 0)
 
 
-class ProxyTest(unittest.IsolatedAsyncioTestCase):
+class ProxyBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.docker = TestServer(fake_docker())
         self.up = TestServer(fake_upstream())
@@ -86,7 +86,7 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         proxy_app.CONNECTOR = f"127.0.0.1:{self.connector.sockets[0].getsockname()[1]}"
         self.proxy = TestServer(proxy_app.make_app())
         await self.proxy.start_server()
-        self.s = aiohttp.ClientSession()
+        self.s = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         self.base = f"http://127.0.0.1:{self.proxy.port}"
         self.host = f"{self.up.port}.{CONTAINER}.localhost:{self.proxy.port}"
 
@@ -96,6 +96,8 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         for srv in (self.proxy, self.up, self.docker):
             await srv.close()
 
+
+class ProxyTest(ProxyBase):
     async def test_ui_lists_and_redirects(self):
         async with self.s.get(self.base + "/") as r:
             self.assertIn(CONTAINER, await r.text())
@@ -169,6 +171,79 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r.status, 404)
         async with self.s.get(self.base + "/", headers={"Host": f"1.{CONTAINER}.localhost"}) as r:
             self.assertEqual(r.status, 502)
+
+
+class AuthTest(ProxyBase):
+    """Same stack with a token set; only the auth-specific tests run."""
+    TOKEN = "s3cret-token"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        proxy_app.TOKEN = self.TOKEN
+
+    async def asyncTearDown(self):
+        proxy_app.TOKEN = ""
+        await super().asyncTearDown()
+
+    def _login_cookie(self):
+        return self.s.post(self.base + "/login", data={"token": self.TOKEN}, allow_redirects=False)
+
+    async def test_ui_requires_login(self):
+        async with self.s.get(self.base + "/") as r:
+            self.assertEqual(r.status, 401)
+            self.assertNotIn(CONTAINER, await r.text())
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port=3000", allow_redirects=False) as r:
+            self.assertEqual(r.status, 401)
+        async with self.s.post(self.base + "/login", data={"token": "wrong"}) as r:
+            self.assertEqual(r.status, 401)
+        async with self._login_cookie() as r:
+            self.assertEqual(r.status, 303)
+        async with self.s.get(self.base + "/") as r:
+            self.assertEqual(r.status, 200)
+            self.assertIn(CONTAINER, await r.text())
+
+    async def test_proxied_host_refused_without_cookie(self):
+        async with self.s.get(self.base + "/a", headers={"Host": self.host}) as r:
+            self.assertEqual(r.status, 401)
+        with self.assertRaises(aiohttp.WSServerHandshakeError):
+            async with self.s.ws_connect(self.base + "/ws", headers={"Host": self.host}):
+                pass
+        async with self.s.get(self.base + f"{proxy_app.HANDOFF_PATH}?t=1.bad",
+                              headers={"Host": self.host}, allow_redirects=False) as r:
+            self.assertEqual(r.status, 401)
+
+    async def test_handoff_sets_host_cookie_incl_websocket(self):
+        async with self._login_cookie():
+            pass
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
+                              allow_redirects=False) as r:
+            loc = r.headers["Location"]
+        host = f"{self.up.port}.{CONTAINER}.localhost"
+        self.assertTrue(loc.startswith(f"http://{host}:{self.proxy.port}{proxy_app.HANDOFF_PATH}?t="))
+        t = loc.split("?t=")[1]
+        async with aiohttp.ClientSession() as fresh:  # new browser, no UI cookie
+            h = {"Host": f"{host}:{self.proxy.port}"}
+            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}", headers=h,
+                                 allow_redirects=False) as r:
+                self.assertEqual((r.status, r.headers["Location"]), (302, "/"))
+            self.assertIn(proxy_app.COOKIE, r.cookies)
+            cookie = {proxy_app.COOKIE: r.cookies[proxy_app.COOKIE].value}
+            async with fresh.get(self.base + "/a", headers={**h, "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}; other=1"}) as r:
+                self.assertEqual(r.status, 200)
+            async with fresh.ws_connect(self.base + "/ws", headers={
+                    **h, "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}"}) as ws:
+                await ws.send_str("hi")
+                self.assertEqual((await ws.receive()).data, "echo:hi")
+            # the cookie is bound to its host
+            other = {"Host": f"1.{CONTAINER}.localhost", "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}"}
+            async with fresh.get(self.base + "/", headers=other) as r:
+                self.assertEqual(r.status, 401)
+
+    def test_handoff_expires(self):
+        v = proxy_app.handoff_value("h", now=1000)
+        self.assertTrue(proxy_app.handoff_valid("h", v, now=1000))
+        self.assertFalse(proxy_app.handoff_valid("h", v, now=1000 + proxy_app.HANDOFF_TTL + 1))
+        self.assertFalse(proxy_app.handoff_valid("other", v, now=1000))
 
 
 if __name__ == "__main__":
