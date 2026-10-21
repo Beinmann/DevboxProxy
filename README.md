@@ -29,7 +29,8 @@ port of any running devbox container in your browser (ticket 004).
 - **UI.** Lists all running containers; ones not from the devbox image or
   not on `devbox-net` are red with the reason and can't be opened. Two
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
-- **Security.** Published on `127.0.0.1` only. The proxy only forwards to
+- **Security.** Published on `127.0.0.1` only (unless you opt in to LAN
+  access, see below). The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
   `GET /containers`, never the raw socket.
@@ -41,6 +42,27 @@ port of any running devbox container in your browser (ticket 004).
   connector is the only component with the raw Docker socket; it is stdlib
   only, reachable just on the internal network, and only ever runs that
   one command in running containers of the devbox image.
+
+## LAN access (opt-in)
+
+    ./start_proxy.sh --lan        # or PROXY_LAN=1 ./start_proxy.sh
+    BASE_DOMAIN=192.168.1.5.nip.io ./start_proxy.sh --lan
+
+Without the flag the proxy is published on `127.0.0.1` only. With it, it
+binds `0.0.0.0` and the script prints a warning.
+
+**Risks:** the proxy has **no authentication yet** (ticket 012), so anyone
+who can reach the port can reach every port of every devbox container —
+including dev servers, shells exposed over HTTP, etc. — and the traffic is
+plain HTTP. Use only on a network you fully trust, or firewall the port.
+Once 012 lands, LAN mode should require its token.
+
+**Hostnames:** `*.localhost` only resolves on the same machine, so links
+from a remote client would break. Set `BASE_DOMAIN` to a wildcard domain
+that resolves to the host (e.g. `<host-ip>.nip.io`, or your own
+`*.example.lan` DNS entry); links then become
+`http://<port>.<container>.<BASE_DOMAIN>:<port>/`. Open the UI via a
+name under that domain too, or via the IP.
 
 ## Known limitations
 
