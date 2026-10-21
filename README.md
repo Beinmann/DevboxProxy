@@ -56,3 +56,7 @@ Covers routing, HTTP/POST/redirects, websockets, the loopback connector
 fallback and errors against a fake
 Docker API. The Docker packaging itself (compose, scripts) is untested —
 it was written in an environment without Docker.
+
+## License
+
+[MIT](LICENSE).
