@@ -138,6 +138,36 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
             await ws.send_str("hi")
             self.assertEqual((await ws.receive()).data, "echo:hi")
 
+    async def test_cross_site_rejected(self):
+        port = self.proxy.port
+        for host in (f"localhost:{port}", self.host):
+            for h in ({"Sec-Fetch-Site": "cross-site"},
+                      {"Origin": "https://evil.example"},
+                      {"Origin": f"http://evil.localhost:{port}"},
+                      {"Origin": f"http://localhost:{port + 1}"},
+                      {"Origin": "null"}):
+                async with self.s.get(self.base + "/", headers={"Host": host, **h}) as r:
+                    self.assertEqual(r.status, 403, (host, h))
+        with self.assertRaises(aiohttp.WSServerHandshakeError):
+            await self.s.ws_connect(self.base + "/ws", headers={
+                "Host": self.host, "Origin": "https://evil.example"})
+
+    async def test_same_origin_and_direct_requests_allowed(self):
+        port = self.proxy.port
+        ui = {"Host": f"localhost:{port}"}
+        for h in ({}, {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Site": "same-origin"},
+                  {"Origin": f"http://localhost:{port}"}):
+            async with self.s.get(self.base + "/", headers={**ui, **h}) as r:
+                self.assertEqual(r.status, 200, h)
+        other = f"http://8080.{CONTAINER}.localhost:{port}"
+        for h in ({"Sec-Fetch-Site": "same-site", "Origin": other}, {"Origin": other}):
+            async with self.s.get(self.base + "/a", headers={"Host": self.host, **h}) as r:
+                self.assertEqual(r.status, 200, h)
+        async with self.s.ws_connect(self.base + "/ws", headers={
+                "Host": self.host, "Origin": f"http://{self.host}"}) as ws:
+            await ws.send_str("hi")
+            self.assertEqual((await ws.receive()).data, "echo:hi")
+
     async def test_loopback_only_via_connector(self):
         host = f"{self.up.port}.{LOOPBACK_ONLY}.localhost:{self.proxy.port}"
         async with self.s.post(self.base + "/post", data=b"x" * 200000, headers={"Host": host}) as r:
