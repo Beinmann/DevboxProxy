@@ -76,11 +76,11 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
 Without the flag the proxy is published on `127.0.0.1` only. With it, it
 binds `0.0.0.0` and the script prints a warning.
 
-**Risks:** the proxy has **no authentication yet** (ticket 012), so anyone
-who can reach the port can reach every port of every devbox container —
-including dev servers, shells exposed over HTTP, etc. — and the traffic is
-plain HTTP. Use only on a network you fully trust, or firewall the port.
-Once 012 lands, LAN mode should require its token.
+**Risks:** access is protected only by the login token (always on, see
+above), and the traffic is plain HTTP, so the token and everything behind it
+can be sniffed on the network. Anyone with the token can reach every port of
+every devbox container — including dev servers, shells exposed over HTTP,
+etc. Use only on a network you fully trust, or firewall the port.
 
 **Hostnames:** `*.localhost` only resolves on the same machine, so links
 from a remote client would break. Set `BASE_DOMAIN` to a wildcard domain
