@@ -3,11 +3,11 @@
 Sister repo to [DevBox](https://github.com/Beinmann/DevBox). One host port, a small web UI, and any
 port of any running devbox container in your browser.
 
-    ./start_proxy.sh        # builds + starts; UI at http://localhost:8080
+    ./start_proxy.sh        # builds + starts; UI at http://localhost:4242
     ./stop_proxy.sh
 
-1. Open `http://localhost:8080`, pick a container, enter a port, **Open**.
-2. You land on `http://<port>.<container>.localhost:8080/`, which is
+1. Open `http://localhost:4242`, pick a container, enter a port, **Open**.
+2. You land on `http://<port>.<container>.localhost:4242/`, which is
    proxied to `<container>:<port>` (HTTP and websockets).
 
 `PROXY_PORT=9000 ./start_proxy.sh` changes the host port.
@@ -46,7 +46,7 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
   not on `devbox-net` are red with the reason and can't be opened. Two
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
 - **Security.** Published on `127.0.0.1` only (compose binds
-  `${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}`; only `--host` widens it,
+  `${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-4242}`; only `--host` widens it,
   see below). Requests that look
   cross-site are rejected with 403: `Sec-Fetch-Site: cross-site`, or an
   `Origin` that isn't the UI/a proxy host on the same port — so other

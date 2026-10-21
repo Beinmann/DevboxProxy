@@ -11,7 +11,7 @@ for arg in "$@"; do
   esac
 done
 
-export PROXY_PORT="${PROXY_PORT:-8080}"
+export PROXY_PORT="${PROXY_PORT:-4242}"
 # Access token: PROXY_TOKEN from the environment, else the one in
 # ./.proxy_token, else a fresh random one saved there (mode 600, gitignored).
 if [ -z "${PROXY_TOKEN:-}" ]; then
