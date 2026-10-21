@@ -1,4 +1,4 @@
-"""Loopback connector for devbox-proxy (ticket 006).
+"""Loopback connector for devbox-proxy.
 
 Lets the proxy reach servers bound to 127.0.0.1 inside a devbox. A client
 connects, sends one line "<container> <port>\\n", gets "OK\\n" (or "ERR

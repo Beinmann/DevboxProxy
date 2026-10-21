@@ -1,7 +1,7 @@
 # devbox-proxy
 
 Sister repo to [DevBox](../devbox). One host port, a small web UI, and any
-port of any running devbox container in your browser (ticket 004).
+port of any running devbox container in your browser.
 
     ./start_proxy.sh        # builds + starts; UI at http://localhost:8080
     ./stop_proxy.sh
@@ -45,7 +45,13 @@ port of any running devbox container in your browser (ticket 004).
 ## Known limitations
 
 - Boxes share `devbox-net`, so they can reach each other too.
-- HTTP only; see ticket 005 for a real domain + HTTPS.
+- HTTP only, no HTTPS or real domain.
+- No authentication: the only protection is the loopback-only port binding.
+  Any local process, and any website open in your browser (via
+  `*.localhost`), can reach the proxied ports.
+- The `connector` service mounts the raw Docker socket as root, which is
+  host-root-equivalent if compromised. See "Loopback-only servers" above for
+  how its surface is limited.
 
 ## Tests
 
@@ -53,6 +59,5 @@ port of any running devbox container in your browser (ticket 004).
     .venv/bin/python -m unittest discover tests
 
 Covers routing, HTTP/POST/redirects, websockets, the loopback connector
-fallback and errors against a fake
-Docker API. The Docker packaging itself (compose, scripts) is untested —
-it was written in an environment without Docker.
+fallback and errors against a fake Docker API. The Docker packaging
+(compose, scripts) is not covered by the tests.

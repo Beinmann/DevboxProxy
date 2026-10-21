@@ -15,7 +15,7 @@ services:
     restart: "no"
 
   # Runs `socat` inside a devbox so the proxy can reach servers bound to
-  # 127.0.0.1 (ticket 006). Holds the raw Docker socket, so it is kept tiny
+  # 127.0.0.1. Holds the raw Docker socket, so it is kept tiny
   # (stdlib only, see connector/connector.py), only reachable on `internal`,
   # and can only run that one fixed command in devbox-image containers.
   connector:

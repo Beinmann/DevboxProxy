@@ -23,7 +23,7 @@ BASE_DOMAIN = os.environ.get("BASE_DOMAIN", "localhost")
 # building links. Falls back to the port in the request's Host header.
 PUBLIC_PORT = os.environ.get("PUBLIC_PORT", "")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
-# host:port of the loopback connector (ticket 006); empty disables the
+# host:port of the loopback connector; empty disables the
 # fallback for servers bound only to 127.0.0.1 inside the container.
 CONNECTOR = os.environ.get("CONNECTOR", "")
 
