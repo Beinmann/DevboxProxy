@@ -44,10 +44,12 @@ services:
       CONNECTOR: connector:8081
       PROXY_TOKEN: ${PROXY_TOKEN:-}
       PUBLIC_PORT: ${PROXY_PORT:-8080}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
     ports:
-      # Loopback only: the proxy forwards to anything in the devbox
-      # containers, so it must not be reachable from the LAN.
-      - "127.0.0.1:${PROXY_PORT:-8080}:8080"
+      # Loopback unless start_proxy.sh --host sets PROXY_BIND=0.0.0.0: the
+      # proxy forwards to anything in the devbox containers, so it must not
+      # be reachable from the LAN by accident.
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}:8080"
     networks: [internal, devbox-net]
     restart: "no"
 

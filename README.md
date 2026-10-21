@@ -46,7 +46,8 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
   not on `devbox-net` are red with the reason and can't be opened. Two
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
 - **Security.** Published on `127.0.0.1` only (compose binds
-  `127.0.0.1:${PROXY_PORT:-8080}`; don't widen it). Requests that look
+  `${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}`; only `--host` widens it,
+  see below). Requests that look
   cross-site are rejected with 403: `Sec-Fetch-Site: cross-site`, or an
   `Origin` that isn't the UI/a proxy host on the same port — so other
   websites can't reach boxes via `*.localhost`. Requests with neither header
@@ -66,6 +67,27 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
   connector is the only component with the raw Docker socket; it is stdlib
   only, reachable just on the internal network, and only ever runs that
   one command in running containers of the devbox image.
+
+## LAN access (opt-in)
+
+    ./start_proxy.sh --host        # or PROXY_HOST=1 ./start_proxy.sh
+    BASE_DOMAIN=192.168.1.5.nip.io ./start_proxy.sh --host
+
+Without the flag the proxy is published on `127.0.0.1` only. With it, it
+binds `0.0.0.0` and the script prints a warning.
+
+**Risks:** the proxy has **no authentication yet** (ticket 012), so anyone
+who can reach the port can reach every port of every devbox container —
+including dev servers, shells exposed over HTTP, etc. — and the traffic is
+plain HTTP. Use only on a network you fully trust, or firewall the port.
+Once 012 lands, LAN mode should require its token.
+
+**Hostnames:** `*.localhost` only resolves on the same machine, so links
+from a remote client would break. Set `BASE_DOMAIN` to a wildcard domain
+that resolves to the host (e.g. `<host-ip>.nip.io`, or your own
+`*.example.lan` DNS entry); links then become
+`http://<port>.<container>.<BASE_DOMAIN>:<port>/`. Open the UI via a
+name under that domain too, or via the IP.
 
 ## Known limitations
 
