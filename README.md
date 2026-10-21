@@ -45,8 +45,8 @@ port of any running devbox container in your browser (ticket 004).
 
 ## LAN access (opt-in)
 
-    ./start_proxy.sh --lan        # or PROXY_LAN=1 ./start_proxy.sh
-    BASE_DOMAIN=192.168.1.5.nip.io ./start_proxy.sh --lan
+    ./start_proxy.sh --host        # or PROXY_HOST=1 ./start_proxy.sh
+    BASE_DOMAIN=192.168.1.5.nip.io ./start_proxy.sh --host
 
 Without the flag the proxy is published on `127.0.0.1` only. With it, it
 binds `0.0.0.0` and the script prints a warning.

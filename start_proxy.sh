@@ -2,18 +2,18 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# Loopback only by default. --lan (or PROXY_LAN=1) publishes on all
+# Loopback only by default. --host (or PROXY_HOST=1) publishes on all
 # interfaces so other machines can reach it (ticket 013).
 for arg in "$@"; do
   case "$arg" in
-    --lan) PROXY_LAN=1 ;;
-    *) echo "usage: $0 [--lan]" >&2; exit 2 ;;
+    --host) PROXY_HOST=1 ;;
+    *) echo "usage: $0 [--host]" >&2; exit 2 ;;
   esac
 done
 
 export PROXY_PORT="${PROXY_PORT:-8080}"
 export BASE_DOMAIN="${BASE_DOMAIN:-localhost}"
-if [ "${PROXY_LAN:-0}" = 1 ]; then
+if [ "${PROXY_HOST:-0}" = 1 ]; then
   PROXY_BIND=0.0.0.0
   echo "!!! WARNING: LAN mode. The proxy is reachable from your network on port $PROXY_PORT" >&2
   echo "!!! and forwards to EVERY port of EVERY devbox container, with NO authentication" >&2
