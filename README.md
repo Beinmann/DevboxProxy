@@ -1,6 +1,6 @@
 # devbox-proxy
 
-Sister repo to [DevBox](../devbox). One host port, a small web UI, and any
+Sister repo to [DevBox](https://github.com/Beinmann/DevBox). One host port, a small web UI, and any
 port of any running devbox container in your browser.
 
     ./start_proxy.sh        # builds + starts; UI at http://localhost:8080
@@ -25,7 +25,8 @@ port of any running devbox container in your browser.
   Targets are resolved by container name via Docker DNS, so no ports need
   publishing and it behaves the same on Linux, WSL and Docker Desktop.
   Requires a DevBox version with `devbox-net`; recreate older boxes
-  (`./stop_dev_container.sh`, then start again).
+  (`./stop_dev_container.sh`, then start again). Boxes must also use the
+  devbox image `my-dev-box-v2` (see Security).
 - **UI.** Lists all running containers; ones not from the devbox image or
   not on `devbox-net` are red with the reason and can't be opened. Two
   checkboxes hide those rows. (`DEVBOX_NET` overrides the network name.)
@@ -33,6 +34,10 @@ port of any running devbox container in your browser.
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
   `GET /containers`, never the raw socket.
+- **Image name.** `my-dev-box-v2` is the image name built by
+  [DevBox](https://github.com/Beinmann/DevBox)'s scripts and compose file.
+  Set `DEVBOX_IMAGE` to override it if your DevBox image is named
+  differently.
 - **Loopback-only servers.** If the direct connect is refused (app bound to
   `127.0.0.1` only), the proxy retries through the `connector` service,
   which runs `docker exec <box> socat - TCP:127.0.0.1:<port>` so the
