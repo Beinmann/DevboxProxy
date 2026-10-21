@@ -50,7 +50,9 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
   see below). Requests that look
   cross-site are rejected with 403: `Sec-Fetch-Site: cross-site`, or an
   `Origin` that isn't the UI/a proxy host on the same port — so other
-  websites can't reach boxes via `*.localhost`. Requests with neither header
+  websites can't reach boxes via `*.localhost`. (Exception: the UI's "Open"
+  link is a cross-site top-level navigation, allowed on the token handoff
+  path only.) Requests with neither header
   (curl, old browsers) are allowed. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to

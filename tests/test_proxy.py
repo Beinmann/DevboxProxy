@@ -242,6 +242,21 @@ class AuthTest(ProxyBase):
                               headers={"Host": self.host}, allow_redirects=False) as r:
             self.assertEqual(r.status, 401)
 
+    async def test_handoff_allows_cross_site_navigation_only(self):
+        host = f"{self.up.port}.{CONTAINER}.localhost:{self.proxy.port}"
+        t = proxy_app.handoff_value(host.rsplit(":", 1)[0])
+        nav = {"Host": host, "Sec-Fetch-Site": "cross-site",
+               "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+        url = f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}"
+        async with self.s.get(url, headers=nav, allow_redirects=False) as r:
+            self.assertEqual(r.status, 302)
+        for bad in ({"Sec-Fetch-Mode": "cors"}, {"Sec-Fetch-Dest": "image"},
+                    {"Origin": "https://evil.example"}):
+            async with self.s.get(url, headers={**nav, **bad}, allow_redirects=False) as r:
+                self.assertEqual(r.status, 403, bad)
+        async with self.s.get(self.base + "/a", headers=nav) as r:
+            self.assertEqual(r.status, 403)
+
     async def test_handoff_sets_host_cookie_incl_websocket(self):
         async with self._login_cookie():
             pass

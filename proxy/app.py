@@ -364,8 +364,17 @@ async def proxy_ws(request, upstream, path):
 def cross_site_reason(request):
     """Why this request looks like it was triggered by another website, or
     None. Requests without Sec-Fetch-Site/Origin (curl, old browsers) pass:
-    they can't be told apart from the user's own tools."""
-    if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+    they can't be told apart from the user's own tools.
+
+    The one exception is the token handoff: the UI (localhost) and a port
+    host (*.localhost) are different sites, so clicking "Open" is a
+    cross-site top-level navigation. It's allowed on HANDOFF_PATH only,
+    which needs a valid signed token anyway."""
+    h = request.headers
+    handoff_nav = (request.method == "GET" and request.path == HANDOFF_PATH
+                   and h.get("Sec-Fetch-Mode", "").lower() == "navigate"
+                   and h.get("Sec-Fetch-Dest", "").lower() == "document")
+    if h.get("Sec-Fetch-Site", "").lower() == "cross-site" and not handoff_nav:
         return "cross-site request"
     origin = request.headers.get("Origin")
     if origin is not None:
