@@ -395,7 +395,10 @@ def cross_site_reason(request):
 async def router(request, handler):
     reason = cross_site_reason(request)
     if reason:
-        return web.Response(status=403, text=f"Forbidden: {reason}.")
+        seen = {k: v for k, v in request.headers.items()
+                if k.lower().startswith("sec-fetch-") or k.lower() == "origin"}
+        print(f"403 {request.method} {request.path} Host={request.headers.get('Host')} {seen}", flush=True)
+        return web.Response(status=403, text=f"Forbidden: {reason}.\n{request.method} {request.path} {seen}")
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:
