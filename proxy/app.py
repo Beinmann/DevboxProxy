@@ -42,6 +42,9 @@ HANDOFF_TTL = 60
 # stalled app or tunnel becomes a 502 instead of an endless spinner.
 UPSTREAM_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "15"))
 log = logging.getLogger("devbox-proxy")
+# Send "localhost:<port>" as Host upstream (original in X-Forwarded-Host) for
+# dev servers that reject unknown hosts (Vite/Astro "forbidden host").
+REWRITE_HOST = os.environ.get("REWRITE_HOST", "") == "1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -239,11 +242,13 @@ async def go(request):
     raise web.HTTPFound(url)
 
 
-def forward_headers(request, skip):
+def forward_headers(request, skip, port=None):
     headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
     peer = request.transport.get_extra_info("peername")
     headers["X-Forwarded-For"] = peer[0] if peer else ""
     headers["X-Forwarded-Host"] = request.headers.get("Host", "")
+    if REWRITE_HOST and port:
+        headers["Host"] = f"localhost:{port}"
     headers["X-Forwarded-Proto"] = request.scheme
     if TOKEN and "Cookie" in headers:  # don't leak our session cookie to apps
         jar = SimpleCookie()
@@ -263,14 +268,14 @@ async def proxy(request, port, container):
     log.info("%s %s%s -> %s", request.method, request.headers.get("Host", ""), path, upstream)
     try:
         try:
-            return await forward(request, upstream, path)
+            return await forward(request, upstream, path, port)
         except aiohttp.ClientConnectorError as e:
             # Nothing on the container's eth0: the server may be bound to
             # 127.0.0.1 only. Retry through the loopback connector.
             if not (CONNECTOR and isinstance(e.os_error, ConnectionRefusedError)):
                 raise
             local = await tunnel_port(request.app, container, port)
-            return await forward(request, f"127.0.0.1:{local}", path)
+            return await forward(request, f"127.0.0.1:{local}", path, port)
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
         log.warning("%s failed: %r", upstream, e)
         return web.Response(
@@ -282,10 +287,10 @@ async def proxy(request, port, container):
         )
 
 
-async def forward(request, upstream, path):
+async def forward(request, upstream, path, port):
     if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await proxy_ws(request, upstream, path)
-    return await proxy_http(request, upstream, path)
+        return await proxy_ws(request, upstream, path, port)
+    return await proxy_http(request, upstream, path, port)
 
 
 async def tunnel_port(app, container, port):
@@ -326,13 +331,13 @@ async def relay(src, dst):
         pass
 
 
-async def proxy_http(request, upstream, path):
+async def proxy_http(request, upstream, path, port):
     session = request.app["upstream"]
     has_body = request.can_read_body
     r = await asyncio.wait_for(session.request(
         request.method,
         f"http://{upstream}{path}",
-        headers=forward_headers(request, HOP_BY_HOP),
+        headers=forward_headers(request, HOP_BY_HOP, port),
         data=request.content if has_body else None,
         allow_redirects=False,
     ), UPSTREAM_TIMEOUT)
@@ -351,12 +356,12 @@ async def proxy_http(request, upstream, path):
         return resp
 
 
-async def proxy_ws(request, upstream, path):
+async def proxy_ws(request, upstream, path, port):
     session = request.app["upstream"]
     protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
     up = await asyncio.wait_for(session.ws_connect(
         f"http://{upstream}{path}",
-        headers=forward_headers(request, WS_SKIP),
+        headers=forward_headers(request, WS_SKIP, port),
         protocols=protocols,
         max_msg_size=0,
         autoclose=False,

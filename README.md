@@ -88,6 +88,15 @@ name under that domain too, or via the IP.
 If `BASE_DOMAIN` is left at its default and you open the UI via an IPv4
 address, the Open links automatically use `<that-ip>.nip.io`.
 
+## Dev servers that reject the hostname
+
+Vite/Astro-style dev servers answer `forbidden host "…"` because the proxy
+forwards the browser's `Host` header unchanged. Either allow the host in the
+dev server (`server.allowedHosts`), or start the proxy with
+`./start_proxy.sh --rewrite-host`: the app then sees `Host: localhost:<port>`
+(the original goes in `X-Forwarded-Host`). Off by default, since apps that
+build redirects or absolute URLs from `Host` would then point at `localhost`.
+
 ## Known limitations
 
 - Boxes share `devbox-net`, so they can reach each other too.

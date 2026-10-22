@@ -45,6 +45,7 @@ services:
       PROXY_TOKEN: ${PROXY_TOKEN:-}
       PUBLIC_PORT: ${PROXY_PORT:-4242}
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      REWRITE_HOST: ${REWRITE_HOST:-}
     ports:
       # Loopback unless start_proxy.sh --host sets PROXY_BIND=0.0.0.0: the
       # proxy forwards to anything in the devbox containers, so it must not

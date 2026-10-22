@@ -130,6 +130,14 @@ class ProxyTest(ProxyBase):
         self.assertEqual(j["path"], "/a/b?x=1")
         self.assertEqual(j["host"], self.host)
 
+    async def test_rewrite_host_sends_localhost_upstream(self):
+        proxy_app.REWRITE_HOST = True
+        self.addCleanup(setattr, proxy_app, "REWRITE_HOST", False)
+        async with self.s.get(self.base + "/", headers={"Host": self.host}) as r:
+            j = await r.json()
+        self.assertEqual(j["host"], f"localhost:{self.up.port}")
+        self.assertEqual(j["xfh"], self.host)
+
     async def test_post_and_redirect_passthrough(self):
         async with self.s.post(self.base + "/post", data=b"payload", headers={"Host": self.host}) as r:
             self.assertEqual((r.status, await r.read(), r.headers["X-T"]), (201, b"payload", "1"))

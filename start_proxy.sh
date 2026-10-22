@@ -7,7 +7,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 for arg in "$@"; do
   case "$arg" in
     --host) PROXY_HOST=1 ;;
-    *) echo "usage: $0 [--host]" >&2; exit 2 ;;
+    --rewrite-host) REWRITE_HOST=1 ;;
+    *) echo "usage: $0 [--host] [--rewrite-host]" >&2; exit 2 ;;
   esac
 done
 
@@ -20,6 +21,7 @@ if [ -z "${PROXY_TOKEN:-}" ]; then
 fi
 export PROXY_TOKEN
 export BASE_DOMAIN="${BASE_DOMAIN:-localhost}"
+export REWRITE_HOST="${REWRITE_HOST:-}"
 if [ "${PROXY_HOST:-0}" = 1 ]; then
   PROXY_BIND=0.0.0.0
   echo "!!! WARNING: LAN mode. The proxy is reachable from your network on port $PROXY_PORT" >&2
@@ -37,7 +39,7 @@ fi
 export PROXY_BIND
 
 sudo docker network inspect devbox-net >/dev/null 2>&1 || sudo docker network create devbox-net >/dev/null
-sudo env DEVBOX_PROXY_WRAPPER=1 PROXY_PORT="$PROXY_PORT" PROXY_BIND="$PROXY_BIND" PROXY_TOKEN="$PROXY_TOKEN" BASE_DOMAIN="$BASE_DOMAIN" docker compose up -d --build
+sudo env DEVBOX_PROXY_WRAPPER=1 PROXY_PORT="$PROXY_PORT" PROXY_BIND="$PROXY_BIND" PROXY_TOKEN="$PROXY_TOKEN" BASE_DOMAIN="$BASE_DOMAIN" REWRITE_HOST="$REWRITE_HOST" docker compose up -d --build
 if [ "$PROXY_BIND" = 127.0.0.1 ]; then
   echo "==> DevBox proxy: http://localhost:$PROXY_PORT"
 else
