@@ -8,14 +8,17 @@ for arg in "$@"; do
   case "$arg" in
     --host) PROXY_HOST=1 ;;
     --rewrite-host) REWRITE_HOST=1 ;;
-    *) echo "usage: $0 [--host] [--rewrite-host]" >&2; exit 2 ;;
+    --no-auth) NO_AUTH=1 ;;
+    *) echo "usage: $0 [--host] [--rewrite-host] [--no-auth]" >&2; exit 2 ;;
   esac
 done
 
 export PROXY_PORT="${PROXY_PORT:-4242}"
 # Access token: PROXY_TOKEN from the environment, else the one in
 # ./.proxy_token, else a fresh random one saved there (mode 600, gitignored).
-if [ -z "${PROXY_TOKEN:-}" ]; then
+if [ "${NO_AUTH:-0}" = 1 ]; then
+  PROXY_TOKEN=""
+elif [ -z "${PROXY_TOKEN:-}" ]; then
   [ -s .proxy_token ] || (umask 077; head -c 24 /dev/urandom | base64 | tr -d '=+/\n' > .proxy_token)
   PROXY_TOKEN="$(cat .proxy_token)"
 fi
@@ -45,4 +48,8 @@ if [ "$PROXY_BIND" = 127.0.0.1 ]; then
 else
   echo "==> DevBox proxy (LAN): http://<this-host>:$PROXY_PORT"
 fi
-echo "==> Login token: ${PROXY_TOKEN:0:4}… (full value: cat .proxy_token)"
+if [ "${NO_AUTH:-0}" = 1 ]; then
+  echo "!!! --no-auth: login token DISABLED, anyone who can reach the port has full access." >&2
+else
+  echo "==> Login token: ${PROXY_TOKEN:0:4}… (full value: cat .proxy_token)"
+fi

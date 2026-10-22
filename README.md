@@ -24,7 +24,9 @@ Open the UI, paste the token into the login form. **Open** then redirects to
 the app host via a signed link valid for 60 s that sets a cookie for that
 one host (`*.localhost` can't share a cookie across subdomains), so
 websockets work too. The cookie is HttpOnly, host-bound, and not forwarded
-to the apps. An empty `PROXY_TOKEN` inside the container disables auth
+to the apps. `./start_proxy.sh --no-auth` disables the token (for testing
+on a trusted machine; never combine with `--host` on a network you don't
+fully control). An empty `PROXY_TOKEN` inside the container does the same
 (warning at startup).
 
 ## How it works
