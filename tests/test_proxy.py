@@ -222,6 +222,20 @@ class AuthTest(ProxyBase):
             self.assertEqual(r.status, 200)
             self.assertIn(CONTAINER, await r.text())
 
+    async def test_icon_served_without_login_and_linked(self):
+        for path in ("/favicon.svg", "/favicon.ico"):
+            async with self.s.get(self.base + path) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.content_type, "image/svg+xml")
+                self.assertIn("<svg", await r.text())
+        async with self.s.get(self.base + "/") as r:  # login page
+            self.assertEqual(r.status, 401)
+            self.assertIn("rel=icon", await r.text())
+        async with self._login_cookie():
+            pass
+        async with self.s.get(self.base + "/") as r:  # main page
+            self.assertIn("rel=icon", await r.text())
+
     async def test_proxied_host_refused_without_cookie(self):
         async with self.s.get(self.base + "/a", headers={"Host": self.host}) as r:
             self.assertEqual(r.status, 401)

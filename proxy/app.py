@@ -148,8 +148,26 @@ def set_session(resp, host):
 HANDOFF_PAGE = ('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content="0;url=/">'
                 '<script>location.replace("/")</script><a href="/">Continue</a>')
 
+# Favicon: a box with an arrow passing through it. Inline so the single-file
+# image needs no extra assets.
+ICON_PATH = "/favicon.svg"
+ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="6" fill="#1f2937"/>'
+    '<path d="M16 5 26 10.5v11L16 27 6 21.5v-11z" fill="none" stroke="#60a5fa" '
+    'stroke-width="2" stroke-linejoin="round"/>'
+    '<path d="M3 16h26m-5-5 5 5-5 5" fill="none" stroke="#fbbf24" stroke-width="2.4" '
+    'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+async def icon(request):
+    return web.Response(text=ICON_SVG, content_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 LOGIN = """<!doctype html><meta charset=utf-8>
 <title>DevBox proxy: login</title>
+<link rel=icon type=image/svg+xml href=/favicon.svg>
 <style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}
 body{max-width:24rem;margin:3rem auto;padding:0 1rem}.err{color:#c33}</style>
 <h1>DevBox proxy</h1>%s
@@ -173,6 +191,7 @@ async def login(request):
 PAGE = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>DevBox proxy</title>
+<link rel=icon type=image/svg+xml href=/favicon.svg>
 <style>
 :root{{color-scheme:light dark;font-family:system-ui,sans-serif}}
 body{{max-width:40rem;margin:2rem auto;padding:0 1rem}}
@@ -416,6 +435,8 @@ async def router(request, handler):
         return await proxy(request, *target)
     if request.path == "/login" and request.method == "POST":
         return await handler(request)
+    if request.path in (ICON_PATH, "/favicon.ico") and request.method == "GET":
+        return await icon(request)
     if not authenticated(request, host):
         return web.Response(text=LOGIN % "", content_type="text/html", status=401)
     return await handler(request)
@@ -444,6 +465,7 @@ def make_app():
     app.router.add_get("/", index)
     app.router.add_get("/go", go)
     app.router.add_post("/login", login)
+    app.router.add_get(ICON_PATH, icon)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
