@@ -67,7 +67,7 @@ to the apps. An empty `PROXY_TOKEN` inside the container disables auth
 ## LAN access (opt-in)
 
     ./start_proxy.sh --host        # or PROXY_HOST=1 ./start_proxy.sh
-    BASE_DOMAIN=192.168.1.5.nip.io ./start_proxy.sh --host
+    BASE_DOMAIN=192-168-1-5.nip.io ./start_proxy.sh --host
 
 Without the flag the proxy is published on `127.0.0.1` only. With it, it
 binds `0.0.0.0` and the script prints a warning.
@@ -80,7 +80,7 @@ etc. Use only on a network you fully trust, or firewall the port.
 
 **Hostnames:** `*.localhost` only resolves on the same machine, so links
 from a remote client would break. Set `BASE_DOMAIN` to a wildcard domain
-that resolves to the host (e.g. `<host-ip>.nip.io`, or your own
+that resolves to the host (e.g. `<host-ip-with-dashes>.nip.io`, e.g. `192-168-1-5.nip.io`, or your own
 `*.example.lan` DNS entry); links then become
 `http://<port>.<container>.<BASE_DOMAIN>:<port>/`. Open the UI via a
 name under that domain too, or via the IP.

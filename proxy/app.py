@@ -86,7 +86,10 @@ def split_host(host_header):
     return host.lower(), port
 
 
-NIP_RE = re.compile(r"\.\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\.nip\.io$")
+# Dashed (192-168-2-227) is what we emit: nip.io resolves the *first* IP-like
+# run in the name, so a container called "box-1" in "box-1.192.168.2.227.nip.io"
+# would resolve to 1.192.168.2 (ticket 016). Dotted still accepted.
+NIP_RE = re.compile(r"\.(\d{1,3}(\.\d{1,3}){3}|\d{1,3}(-\d{1,3}){3})\.nip\.io$")
 
 
 def parse_target(host):
@@ -226,7 +229,7 @@ async def go(request):
     domain = BASE_DOMAIN
     ui_host, _ = split_host(request.headers.get("Host", ""))
     if domain == "localhost" and re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ui_host):
-        domain = f"{ui_host}.nip.io"  # *.localhost wouldn't reach this machine
+        domain = f"{ui_host.replace('.', '-')}.nip.io"  # *.localhost wouldn't reach this machine
     host = f"{int(port)}.{quote(c)}.{domain}"
     url = f"http://{host}{suffix}/"
     if TOKEN:

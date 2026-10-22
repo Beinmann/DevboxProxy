@@ -29,7 +29,7 @@ if [ "${PROXY_HOST:-0}" = 1 ]; then
   if [ "$BASE_DOMAIN" = localhost ]; then
     echo "!!! Links use *.localhost, which does not resolve on other machines. Set" >&2
     echo "!!! BASE_DOMAIN to a wildcard domain pointing at this host, e.g." >&2
-    echo "!!! BASE_DOMAIN=192.168.1.5.nip.io (see README)." >&2
+    echo "!!! BASE_DOMAIN=192-168-1-5.nip.io (see README)." >&2
   fi
 else
   PROXY_BIND=127.0.0.1

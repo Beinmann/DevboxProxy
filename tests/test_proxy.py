@@ -230,7 +230,7 @@ class AuthTest(ProxyBase):
         async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
                               allow_redirects=False) as r:
             loc = r.headers["Location"]
-        host = f"{self.up.port}.{CONTAINER}.127.0.0.1.nip.io"  # UI was opened via an IP
+        host = f"{self.up.port}.{CONTAINER}.127-0-0-1.nip.io"  # UI was opened via an IP
         self.assertTrue(loc.startswith(f"http://{host}:{self.proxy.port}{proxy_app.HANDOFF_PATH}?t="))
         t = loc.split("?t=")[1]
         async with aiohttp.ClientSession() as fresh:  # new browser, no UI cookie
