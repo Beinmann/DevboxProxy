@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -37,6 +38,10 @@ TOKEN = os.environ.get("PROXY_TOKEN", "")
 COOKIE = "devbox_proxy_auth"
 HANDOFF_PATH = "/__devbox_auth"
 HANDOFF_TTL = 60
+# Max wait for the upstream to connect / start answering (ticket 016): a
+# stalled app or tunnel becomes a 502 instead of an endless spinner.
+UPSTREAM_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "15"))
+log = logging.getLogger("devbox-proxy")
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -252,6 +257,7 @@ async def proxy(request, port, container):
         return web.Response(status=404, text=f"No running devbox container named {container!r}.")
     upstream = f"{container}:{port}"
     path = request.raw_path
+    log.info("%s %s%s -> %s", request.method, request.headers.get("Host", ""), path, upstream)
     try:
         try:
             return await forward(request, upstream, path)
@@ -263,9 +269,10 @@ async def proxy(request, port, container):
             local = await tunnel_port(request.app, container, port)
             return await forward(request, f"127.0.0.1:{local}", path)
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        log.warning("%s failed: %r", upstream, e)
         return web.Response(
             status=502,
-            text=(f"Cannot reach {upstream}: {e}\n\n"
+            text=(f"Cannot reach {upstream}: {e or type(e).__name__}\n\n"
                   "Is something listening on that port? Is the proxy on the "
                   "container's network (devbox-net)? Servers bound to 127.0.0.1 "
                   "need the connector and `socat` in the devbox image."),
@@ -287,12 +294,15 @@ async def tunnel_port(app, container, port):
         async def on_conn(r, w):
             host, _, cport = CONNECTOR.rpartition(":")
             try:
-                ur, uw = await asyncio.open_connection(host, int(cport))
-                uw.write(f"{container} {port}\n".encode())
-                await uw.drain()
-                if (await ur.readline()).strip() != b"OK":
-                    raise ConnectionError("connector refused")
-            except (OSError, ConnectionError):
+                async with asyncio.timeout(UPSTREAM_TIMEOUT):
+                    ur, uw = await asyncio.open_connection(host, int(cport))
+                    uw.write(f"{container} {port}\n".encode())
+                    await uw.drain()
+                    reply = (await ur.readline()).strip()
+                if reply != b"OK":
+                    raise ConnectionError(f"connector said {reply!r}")
+            except (OSError, ConnectionError, TimeoutError) as e:
+                log.warning("tunnel %s:%s failed: %r", container, port, e)
                 w.close()
                 return
             await asyncio.gather(relay(r, uw), relay(ur, w), return_exceptions=True)
@@ -316,13 +326,14 @@ async def relay(src, dst):
 async def proxy_http(request, upstream, path):
     session = request.app["upstream"]
     has_body = request.can_read_body
-    async with session.request(
+    r = await asyncio.wait_for(session.request(
         request.method,
         f"http://{upstream}{path}",
         headers=forward_headers(request, HOP_BY_HOP),
         data=request.content if has_body else None,
         allow_redirects=False,
-    ) as r:
+    ), UPSTREAM_TIMEOUT)
+    async with r:
         resp = web.StreamResponse(status=r.status, reason=r.reason)
         for k, v in r.headers.items():
             if k.lower() not in HOP_BY_HOP and k.lower() != "content-length":
@@ -340,14 +351,15 @@ async def proxy_http(request, upstream, path):
 async def proxy_ws(request, upstream, path):
     session = request.app["upstream"]
     protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
-    async with session.ws_connect(
+    up = await asyncio.wait_for(session.ws_connect(
         f"http://{upstream}{path}",
         headers=forward_headers(request, WS_SKIP),
         protocols=protocols,
         max_msg_size=0,
         autoclose=False,
         autoping=False,
-    ) as up:
+    ), UPSTREAM_TIMEOUT)
+    async with up:
         down = web.WebSocketResponse(protocols=[up.protocol] if up.protocol else (), max_msg_size=0,
                                      autoclose=False, autoping=False)
         await down.prepare(request)
@@ -430,6 +442,7 @@ def make_app():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not TOKEN:
         print("WARNING: PROXY_TOKEN is empty, authentication is disabled", flush=True)
     web.run_app(make_app(), host="0.0.0.0", port=LISTEN_PORT)

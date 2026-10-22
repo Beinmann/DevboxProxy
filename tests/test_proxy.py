@@ -101,7 +101,8 @@ class ProxyTest(ProxyBase):
     async def test_ui_lists_and_redirects(self):
         async with self.s.get(self.base + "/") as r:
             self.assertIn(CONTAINER, await r.text())
-        async with self.s.get(self.base + f"/go?c={CONTAINER}&port=3000", allow_redirects=False) as r:
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port=3000", allow_redirects=False,
+                              headers={"Host": f"localhost:{self.proxy.port}"}) as r:
             self.assertEqual(r.status, 302)
             self.assertEqual(r.headers["Location"], f"http://3000.{CONTAINER}.localhost:{self.proxy.port}/")
         async with self.s.get(self.base + "/go?c=evil&port=3000", allow_redirects=False) as r:
@@ -158,6 +159,17 @@ class ProxyTest(ProxyBase):
         port = srv.sockets[0].getsockname()[1]
         async with self.s.get(self.base + "/", headers={"Host": f"{port}.{CONTAINER}.localhost"}) as r:
             self.assertEqual(r.status, 502)
+        srv.close()
+
+    async def test_stalled_upstream_is_502_not_a_hang(self):
+        proxy_app.UPSTREAM_TIMEOUT = 0.5
+        held = []
+        srv = await asyncio.start_server(lambda r, w: held.append(w), "127.0.0.1", 0)
+        port = srv.sockets[0].getsockname()[1]
+        async with self.s.get(self.base + "/", headers={"Host": f"{port}.{CONTAINER}.localhost"},
+                              timeout=aiohttp.ClientTimeout(total=5)) as r:
+            self.assertEqual(r.status, 502)
+            self.assertIn("Cannot reach", await r.text())
         srv.close()
 
     async def test_refused_without_connector_is_502(self):
@@ -218,7 +230,7 @@ class AuthTest(ProxyBase):
         async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
                               allow_redirects=False) as r:
             loc = r.headers["Location"]
-        host = f"{self.up.port}.{CONTAINER}.localhost"
+        host = f"{self.up.port}.{CONTAINER}.127.0.0.1.nip.io"  # UI was opened via an IP
         self.assertTrue(loc.startswith(f"http://{host}:{self.proxy.port}{proxy_app.HANDOFF_PATH}?t="))
         t = loc.split("?t=")[1]
         async with aiohttp.ClientSession() as fresh:  # new browser, no UI cookie
