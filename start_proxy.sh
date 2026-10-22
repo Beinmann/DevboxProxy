@@ -42,6 +42,9 @@ fi
 export PROXY_BIND
 
 sudo docker network inspect devbox-net >/dev/null 2>&1 || sudo docker network create devbox-net >/dev/null
+# Remove leftover stopped containers of this project (e.g. after a reboot;
+# restart is "no") so they can't block the new ones. Running ones are kept.
+sudo env DEVBOX_PROXY_WRAPPER=1 docker compose rm -f >/dev/null 2>&1 || true
 sudo env DEVBOX_PROXY_WRAPPER=1 PROXY_PORT="$PROXY_PORT" PROXY_BIND="$PROXY_BIND" PROXY_TOKEN="$PROXY_TOKEN" BASE_DOMAIN="$BASE_DOMAIN" REWRITE_HOST="$REWRITE_HOST" docker compose up -d --build
 if [ "$PROXY_BIND" = 127.0.0.1 ]; then
   echo "==> DevBox proxy: http://localhost:$PROXY_PORT"
