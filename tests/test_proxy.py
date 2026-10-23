@@ -274,6 +274,23 @@ class AuthTest(ProxyBase):
             async with fresh.get(self.base + "/", headers=other) as r:
                 self.assertEqual(r.status, 401)
 
+    async def test_handoff_with_existing_cookie_not_forwarded(self):
+        # Second Open for the same host: the browser already has a valid cookie.
+        async with self._login_cookie():
+            pass
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
+                              allow_redirects=False) as r:
+            loc = r.headers["Location"]
+        host, t = loc.split("/")[2].rsplit(":", 1)[0], loc.split("?t=")[1]
+        async with aiohttp.ClientSession() as fresh:
+            h = {"Host": f"{host}:{self.proxy.port}"}
+            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}", headers=h) as r:
+                cookie = r.cookies[proxy_app.COOKIE].value
+            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}",
+                                 headers={**h, "Cookie": f"{proxy_app.COOKIE}={cookie}"}) as r:
+                self.assertEqual(r.status, 200)
+                self.assertIn('url=/', await r.text())
+
     def test_handoff_expires(self):
         v = proxy_app.handoff_value("h", now=1000)
         self.assertTrue(proxy_app.handoff_valid("h", v, now=1000))

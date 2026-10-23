@@ -421,14 +421,17 @@ async def router(request, handler):
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:
+        if TOKEN and request.path == HANDOFF_PATH and handoff_valid(host, request.query.get("t", "")):
+            # Handled even when the browser already has a valid cookie (the
+            # cookie is the same on every visit); otherwise the request would
+            # be forwarded to the app, which 404s. Not a 302: a browser keeps
+            # the cross-site initiator across redirects, so "/" would be
+            # rejected too. A page that navigates itself makes the next
+            # request same-origin.
+            resp = web.Response(text=HANDOFF_PAGE, content_type="text/html")
+            set_session(resp, host)
+            return resp
         if TOKEN and not authenticated(request, host):
-            if request.path == HANDOFF_PATH and handoff_valid(host, request.query.get("t", "")):
-                # Not a 302: a browser keeps the cross-site initiator across
-                # redirects, so "/" would be rejected too. A page that
-                # navigates itself makes the next request same-origin.
-                resp = web.Response(text=HANDOFF_PAGE, content_type="text/html")
-                set_session(resp, host)
-                return resp
             return web.Response(
                 status=401,
                 text="Unauthorized. Open the DevBox proxy UI, log in and use it to open this port.")
