@@ -1,5 +1,8 @@
 # devbox-proxy
 
+> **Deprecated.** This project is no longer the recommended way to reach
+> devbox ports and is not being extended. It still works as described below.
+
 Sister repo to [DevBox](https://github.com/Beinmann/DevBox). One host port, a small web UI, and any
 port of any running devbox container in your browser.
 
