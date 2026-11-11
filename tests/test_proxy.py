@@ -6,6 +6,7 @@ lookup lands on localhost. Run: python -m unittest discover tests
 import asyncio
 import os
 import sys
+import time
 import unittest
 
 import aiohttp
@@ -21,24 +22,69 @@ CONTAINER = "127.0.0.1"
 LOOPBACK_ONLY = "127.0.0.2"
 
 
-def fake_docker():
-    async def containers(request):
-        net = {"NetworkSettings": {"Networks": {"devbox-net": {}}}}
-        boxes = [{"Id": "a", "Names": ["/" + CONTAINER], **net},
-                 {"Id": "b", "Names": ["/" + LOOPBACK_ONLY], **net},
-                 {"Id": "c", "Names": ["/nonet"], "NetworkSettings": {"Networks": {"bridge": {}}}}]
+NET = {"NetworkSettings": {"Networks": {"devbox-net": {}}}}
+
+
+class FakeDocker:
+    """Fake Docker API: /containers/json (answers the ancestor filter like
+    Docker would) and a /events stream. `boxes` is mutable; emit() pushes an
+    event line to every open stream and drop() closes them."""
+
+    def __init__(self):
+        self.boxes = [{"Id": "a", "Names": ["/" + CONTAINER], **NET},
+                      {"Id": "b", "Names": ["/" + LOOPBACK_ONLY], **NET},
+                      {"Id": "c", "Names": ["/nonet"], "NetworkSettings": {"Networks": {"bridge": {}}}}]
+        self.others = [{"Id": "d", "Names": ["/postgres"], **NET},
+                       {"Id": "e", "Names": ["/docker-socket-proxy"], **NET}]
+        self.list_calls = 0
+        self.events_params = []
+        self.events_status = 200
+        self.streams = []
+        self.app = web.Application()
+        self.app.router.add_get("/containers/json", self.containers)
+        self.app.router.add_get("/events", self.events)
+
+    async def containers(self, request):
+        self.list_calls += 1
         if "my-dev-box-v2" in request.query["filters"]:
-            return web.json_response(boxes)
-        return web.json_response(boxes + [{"Id": "d", "Names": ["/postgres"], **net}])
-    a = web.Application()
-    a.router.add_get("/containers/json", containers)
-    return a
+            return web.json_response(self.boxes)
+        return web.json_response(self.boxes + self.others)
+
+    async def events(self, request):
+        self.events_params.append(dict(request.query))
+        if self.events_status != 200:
+            return web.Response(status=self.events_status)
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        q = asyncio.Queue()
+        self.streams.append(q)
+        try:
+            while (line := await q.get()) is not None:
+                await resp.write(line)
+        finally:
+            self.streams.remove(q)
+        return resp
+
+    def emit(self, event="start"):
+        for q in self.streams:
+            q.put_nowait(b'{"Type":"container","Action":"%s"}\n' % event.encode())
+
+    def drop(self):
+        for q in list(self.streams):
+            q.put_nowait(None)
+
+
+async def until(cond, timeout=5):
+    async with asyncio.timeout(timeout):
+        while not cond():
+            await asyncio.sleep(0.01)
 
 
 def fake_upstream():
     async def hello(request):
         return web.json_response({"path": request.raw_path, "host": request.headers["Host"],
-                                  "xfh": request.headers["X-Forwarded-Host"]})
+                                  "xfh": request.headers["X-Forwarded-Host"],
+                                  "cookie": request.headers.get("Cookie", "")})
 
     async def post(request):
         return web.Response(body=await request.read(), status=201, headers={"X-T": "1"})
@@ -77,15 +123,19 @@ async def fake_connector_server(upstream_port):
 
 class ProxyBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.docker = TestServer(fake_docker())
+        self.fake = FakeDocker()
+        self.docker = TestServer(self.fake.app)
         self.up = TestServer(fake_upstream())
         await self.docker.start_server()
         await self.up.start_server()
         proxy_app.DOCKER_API = f"http://127.0.0.1:{self.docker.port}"
         self.connector = await fake_connector_server(self.up.port)
         proxy_app.CONNECTOR = f"127.0.0.1:{self.connector.sockets[0].getsockname()[1]}"
+        proxy_app.EVENT_DEBOUNCE, proxy_app.EVENT_RETRY = 0.01, 0.05
         self.proxy = TestServer(proxy_app.make_app())
         await self.proxy.start_server()
+        self.watcher = self.proxy.app["devboxes"]
+        await until(lambda: self.watcher.streaming and self.watcher.synced)
         self.s = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         self.base = f"http://127.0.0.1:{self.proxy.port}"
         self.host = f"{self.up.port}.{CONTAINER}.localhost:{self.proxy.port}"
@@ -236,66 +286,201 @@ class AuthTest(ProxyBase):
         async with self.s.get(self.base + "/") as r:  # main page
             self.assertIn("rel=icon", await r.text())
 
-    async def test_proxied_host_refused_without_cookie(self):
-        async with self.s.get(self.base + "/a", headers={"Host": self.host}) as r:
-            self.assertEqual(r.status, 401)
-        with self.assertRaises(aiohttp.WSServerHandshakeError):
-            async with self.s.ws_connect(self.base + "/ws", headers={"Host": self.host}):
-                pass
-        async with self.s.get(self.base + f"{proxy_app.HANDOFF_PATH}?t=1.bad",
-                              headers={"Host": self.host}, allow_redirects=False) as r:
-            self.assertEqual(r.status, 401)
-
-    async def test_handoff_sets_host_cookie_incl_websocket(self):
+    async def _open(self, c=CONTAINER, port=None, ui_host="127.0.0.1"):
+        """What the UI's Open button does; returns the capability host (with port)."""
         async with self._login_cookie():
             pass
-        async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
-                              allow_redirects=False) as r:
-            loc = r.headers["Location"]
-        host = f"{self.up.port}.{CONTAINER}.127-0-0-1.nip.io"  # UI was opened via an IP
-        self.assertTrue(loc.startswith(f"http://{host}:{self.proxy.port}{proxy_app.HANDOFF_PATH}?t="))
-        t = loc.split("?t=")[1]
-        async with aiohttp.ClientSession() as fresh:  # new browser, no UI cookie
-            h = {"Host": f"{host}:{self.proxy.port}"}
-            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}", headers=h,
-                                 allow_redirects=False) as r:
-                self.assertEqual(r.status, 200)
-                self.assertIn('url=/', await r.text())
-            self.assertIn(proxy_app.COOKIE, r.cookies)
-            cookie = {proxy_app.COOKIE: r.cookies[proxy_app.COOKIE].value}
-            async with fresh.get(self.base + "/a", headers={**h, "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}; other=1"}) as r:
-                self.assertEqual(r.status, 200)
-            async with fresh.ws_connect(self.base + "/ws", headers={
-                    **h, "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}"}) as ws:
+        async with self.s.get(self.base + f"/go?c={c}&port={port or self.up.port}",
+                              allow_redirects=False, headers={"Host": f"{ui_host}:{self.proxy.port}"}) as r:
+            self.assertEqual(r.status, 302)
+            return r.headers["Location"].split("/")[2]
+
+    async def test_go_mints_capability_host(self):
+        host = await self._open()  # UI opened via an IP -> nip.io
+        label = proxy_app.cap_label(self.up.port, CONTAINER)
+        self.assertEqual(host, f"{self.up.port}.{CONTAINER}.{label}.127-0-0-1.nip.io:{self.proxy.port}")
+        self.assertLessEqual(len(label), 63)  # one DNS label
+        self.assertEqual(await self._open(), host)  # stable, so the origin (localStorage) survives
+        ui = {"Host": f"localhost:{self.proxy.port}"}  # UI opened as localhost: *.localhost links
+        async with self.s.post(self.base + "/login", data={"token": self.TOKEN}, headers=ui):
+            pass
+        async with self.s.get(self.base + f"/go?c={CONTAINER}&port=3000", allow_redirects=False,
+                              headers=ui) as r:
+            self.assertRegex(r.headers["Location"], r"^http://3000\.127\.0\.0\.1\.[0-9a-f]{42}\.localhost:\d+/$")
+
+    async def test_capability_host_needs_no_cookie_incl_subresources_and_websocket(self):
+        host = await self._open()
+        async with aiohttp.ClientSession() as fresh:  # no cookies at all, like a sandboxed iframe
+            h = {"Host": host, "Origin": "null", "Sec-Fetch-Site": "cross-site"}
+            for path in ("/", "/sdk.js", "/widgets/a.js"):
+                async with fresh.get(self.base + path, headers=h) as r:
+                    self.assertEqual(r.status, 200, path)
+                    self.assertEqual((await r.json())["path"], path)
+                    self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+            async with fresh.post(self.base + "/post", data=b"x", headers=h) as r:
+                self.assertEqual(r.status, 201)
+            async with fresh.ws_connect(self.base + "/ws", headers=h) as ws:
                 await ws.send_str("hi")
                 self.assertEqual((await ws.receive()).data, "echo:hi")
-            # the cookie is bound to its host
-            other = {"Host": f"1.{CONTAINER}.localhost", "Cookie": f"{proxy_app.COOKIE}={cookie[proxy_app.COOKIE]}"}
-            async with fresh.get(self.base + "/", headers=other) as r:
-                self.assertEqual(r.status, 401)
 
-    async def test_handoff_with_existing_cookie_not_forwarded(self):
-        # Second Open for the same host: the browser already has a valid cookie.
-        async with self._login_cookie():
+    async def test_capability_host_via_localhost_and_loopback_connector(self):
+        label = proxy_app.cap_label(self.up.port, LOOPBACK_ONLY)
+        host = f"{self.up.port}.{LOOPBACK_ONLY}.{label}.localhost:{self.proxy.port}"
+        async with self.s.get(self.base + "/a", headers={"Host": host}) as r:
+            self.assertEqual((await r.json())["path"], "/a")
+
+    async def test_proxied_host_refused_without_valid_capability(self):
+        good = proxy_app.cap_label(self.up.port, CONTAINER)
+        other_port = proxy_app.cap_label(self.up.port + 1, CONTAINER)
+        other_box = proxy_app.cap_label(self.up.port, LOOPBACK_ONLY)
+        expired = proxy_app.cap_label(self.up.port, CONTAINER, now=time.time() - 3 * proxy_app.CAP_TTL)
+        tampered = good[:-1] + ("0" if good[-1] != "0" else "1")
+        hosts = [f"{self.up.port}.{CONTAINER}.localhost",           # no label
+                 f"{self.up.port}.{CONTAINER}.{other_port}.localhost",
+                 f"{self.up.port}.{CONTAINER}.{other_box}.localhost",
+                 f"{self.up.port}.{CONTAINER}.{expired}.localhost",
+                 f"{self.up.port}.{CONTAINER}.{tampered}.localhost",
+                 f"{self.up.port}.{CONTAINER}.{good.upper()}x.localhost",
+                 f"{self.up.port}.{CONTAINER}.nothex.localhost"]
+        async with self._login_cookie():  # even a logged-in UI cookie doesn't help
             pass
-        async with self.s.get(self.base + f"/go?c={CONTAINER}&port={self.up.port}",
-                              allow_redirects=False) as r:
-            loc = r.headers["Location"]
-        host, t = loc.split("/")[2].rsplit(":", 1)[0], loc.split("?t=")[1]
-        async with aiohttp.ClientSession() as fresh:
-            h = {"Host": f"{host}:{self.proxy.port}"}
-            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}", headers=h) as r:
-                cookie = r.cookies[proxy_app.COOKIE].value
-            async with fresh.get(f"{self.base}{proxy_app.HANDOFF_PATH}?t={t}",
-                                 headers={**h, "Cookie": f"{proxy_app.COOKIE}={cookie}"}) as r:
-                self.assertEqual(r.status, 200)
-                self.assertIn('url=/', await r.text())
+        for host in hosts:
+            async with self.s.get(self.base + "/a", headers={"Host": host}) as r:
+                self.assertEqual(r.status, 401, host)
+            with self.assertRaises(aiohttp.WSServerHandshakeError):
+                async with self.s.ws_connect(self.base + "/ws", headers={"Host": host}):
+                    pass
+        # label for another container doesn't work with a rewritten container part
+        async with self.s.get(self.base + "/a", headers={
+                "Host": f"{self.up.port}.{LOOPBACK_ONLY}.{good}.localhost"}) as r:
+            self.assertEqual(r.status, 401)
+        # a token-less test above would have worked; a different token invalidates the label
+        proxy_app.TOKEN = "rotated"
+        async with self.s.get(self.base + "/a", headers={
+                "Host": f"{self.up.port}.{CONTAINER}.{good}.localhost"}) as r:
+            self.assertEqual(r.status, 401)
 
-    def test_handoff_expires(self):
-        v = proxy_app.handoff_value("h", now=1000)
-        self.assertTrue(proxy_app.handoff_valid("h", v, now=1000))
-        self.assertFalse(proxy_app.handoff_valid("h", v, now=1000 + proxy_app.HANDOFF_TTL + 1))
-        self.assertFalse(proxy_app.handoff_valid("other", v, now=1000))
+    def test_capability_expiry_and_window(self):
+        ttl = proxy_app.CAP_TTL
+        label = proxy_app.cap_label(80, "box", now=1000)
+        self.assertEqual(label, proxy_app.cap_label(80, "box", now=ttl - 1))  # same window
+        self.assertNotEqual(label, proxy_app.cap_label(80, "box", now=1000 + ttl))
+        self.assertTrue(proxy_app.cap_valid(80, "box", label, now=1000 + ttl))  # lives >= one TTL
+        self.assertFalse(proxy_app.cap_valid(80, "box", label, now=3 * ttl))
+        self.assertFalse(proxy_app.cap_valid(80, "box", label, now=1000 + 2 * ttl + 1))
+        self.assertFalse(proxy_app.cap_valid(81, "box", label, now=1000))
+        self.assertFalse(proxy_app.cap_valid(80, "other", label, now=1000))
+
+    async def test_app_cookies_pass_through_and_log_hides_capability(self):
+        host = await self._open()
+        with self.assertLogs("devbox-proxy", "INFO") as logs:
+            async with aiohttp.ClientSession() as fresh, fresh.get(self.base + "/a", headers={
+                    "Host": host, "Cookie": f"{proxy_app.COOKIE}=x; theme=dark"}) as r:
+                self.assertEqual((await r.json())["cookie"], f"{proxy_app.COOKIE}=x; theme=dark")
+        self.assertNotIn(proxy_app.cap_label(self.up.port, CONTAINER), "\n".join(logs.output))
+
+    async def test_ui_login_unchanged_and_referrer_policy(self):
+        async with self.s.get(self.base + "/") as r:
+            self.assertEqual((r.status, r.headers["Referrer-Policy"]), (401, "no-referrer"))
+        async with self._login_cookie() as r:
+            self.assertEqual(r.status, 303)
+            self.assertIn(proxy_app.COOKIE, r.cookies)
+        async with self.s.get(self.base + "/") as r:
+            self.assertEqual((r.status, r.headers["Referrer-Policy"]), (200, "no-referrer"))
+
+    async def test_old_handoff_path_is_just_forwarded_or_refused(self):
+        async with self.s.get(self.base + "/__devbox_auth?t=1.bad",
+                              headers={"Host": f"{self.up.port}.{CONTAINER}.localhost"}) as r:
+            self.assertEqual(r.status, 401)
+
+
+class AllowlistTest(ProxyBase):
+    """The allowed-container set comes from Docker's event stream, not per request."""
+
+    async def get(self, container, path="/a"):
+        host = f"{self.up.port}.{container}.localhost"
+        async with self.s.get(self.base + path, headers={"Host": host}) as r:
+            return r.status
+
+    async def test_no_docker_calls_per_request(self):
+        before = self.fake.list_calls
+        for _ in range(10):
+            self.assertEqual(await self.get(CONTAINER), 200)
+        async with self.s.ws_connect(self.base + "/ws", headers={"Host": self.host}):
+            pass
+        self.assertEqual(self.fake.list_calls, before)
+        # asked for events since shortly before the fill, limited to relevant ones
+        params = self.fake.events_params[0]
+        self.assertIn("since", params)
+        self.assertIn('"connect"', params["filters"])
+
+    async def test_non_devbox_containers_stay_blocked(self):
+        for name in ("postgres", "docker-socket-proxy", "nonet", "nope"):
+            self.assertEqual(await self.get(name), 404, name)
+        self.assertEqual(self.watcher.names, {CONTAINER, LOOPBACK_ONLY})
+
+    async def test_events_update_the_set(self):
+        new = {"Id": "n", "Names": ["/127.0.0.3"], **NET}
+        self.assertEqual(await self.get("127.0.0.3"), 404)
+        self.fake.boxes.append(new)
+        self.fake.emit("start")
+        await until(lambda: "127.0.0.3" in self.watcher.names)
+        self.fake.boxes.remove(new)
+        self.fake.emit("die")
+        await until(lambda: "127.0.0.3" not in self.watcher.names)
+        self.assertEqual(await self.get("127.0.0.3"), 404)
+        # a non-devbox container appearing is listed by Docker but never allowed
+        self.fake.others.append({"Id": "x", "Names": ["/127.0.0.4"], **NET})
+        calls = self.fake.list_calls
+        self.fake.emit("start")
+        await until(lambda: self.fake.list_calls > calls)
+        await asyncio.sleep(0.1)
+        self.assertEqual(await self.get("127.0.0.4"), 404)
+
+    async def test_event_bursts_are_coalesced(self):
+        calls = self.fake.list_calls
+        for _ in range(20):
+            self.fake.emit("exec")
+        await asyncio.sleep(0.3)
+        self.assertLessEqual(self.fake.list_calls - calls, 4)  # 2 calls per re-list
+
+    async def test_resync_after_reconnect(self):
+        new = {"Id": "n", "Names": ["/127.0.0.3"], **NET}
+        self.fake.events_status = 503  # stream can't come back yet
+        self.fake.drop()
+        await until(lambda: not self.watcher.streaming)
+        self.fake.boxes.append(new)  # changed while we were blind
+        # while the stream is down the proxy asks Docker directly (still correct)
+        before = self.fake.list_calls
+        self.assertEqual(await self.get("127.0.0.3"), 502)  # allowed (nothing listens there), not 404
+        self.assertGreater(self.fake.list_calls, before)
+        self.fake.events_status = 200
+        await until(lambda: self.watcher.streaming and self.watcher.synced)
+        self.assertIn("127.0.0.3", self.watcher.names)
+        before = self.fake.list_calls
+        self.assertEqual(await self.get("127.0.0.3"), 502)
+        self.assertEqual(self.fake.list_calls, before)  # cached again
+
+    async def test_quiet_stream_is_resynced_periodically(self):
+        proxy_app.RESYNC_INTERVAL = 0.1
+        self.addCleanup(setattr, proxy_app, "RESYNC_INTERVAL", 60.0)
+        self.fake.drop()  # reconnect picks up the short interval
+        await until(lambda: self.watcher.streaming and self.watcher.synced)
+        self.fake.boxes.append({"Id": "n", "Names": ["/127.0.0.3"], **NET})  # no event emitted
+        await until(lambda: "127.0.0.3" in self.watcher.names)
+
+    async def test_starts_even_if_docker_is_down_at_first(self):
+        await self.proxy.close()
+        self.fake.events_status = 503
+        proxy_app.EVENT_RETRY = 0.05
+        self.proxy = TestServer(proxy_app.make_app())
+        await self.proxy.start_server()
+        self.base = f"http://127.0.0.1:{self.proxy.port}"
+        self.watcher = self.proxy.app["devboxes"]
+        self.assertFalse(self.watcher.streaming)
+        self.assertEqual(await self.get(CONTAINER), 200)  # direct lookup fallback
+        self.fake.events_status = 200
+        await until(lambda: self.watcher.streaming and self.watcher.synced)
 
 
 if __name__ == "__main__":

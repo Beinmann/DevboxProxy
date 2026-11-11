@@ -3,12 +3,14 @@
 x-require-wrapper: "${DEVBOX_PROXY_WRAPPER:?Use ./start_proxy.sh instead of calling docker compose directly}"
 
 services:
-  # Read-only, containers-only view of the Docker API. The proxy never gets
-  # the raw socket, so a bug in it can't create/exec/stop containers.
+  # Read-only, containers-only view of the Docker API (plus the event
+  # stream). The proxy never gets the raw socket, so a bug in it can't
+  # create/exec/stop containers.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
     environment:
       CONTAINERS: 1   # GET /containers/json only; POST etc. stay off
+      EVENTS: 1       # GET /events: the proxy keeps its allowlist current from it
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [internal]

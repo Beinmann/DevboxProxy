@@ -4,6 +4,11 @@ UI at http://localhost:<port>/ lists running devbox containers. An app on
 port P in container C is reachable at http://P.C.localhost:<port>/ — the
 proxy routes on the Host header, so absolute asset paths and websockets
 (HMR) work unchanged.
+
+With a token set, the UI's /go mints a capability hostname
+P.C.<secret>.localhost: the secret label is a signed, expiring HMAC, so
+every request to that host is authorized without a cookie (sandboxed
+iframes with an opaque origin can't send cookies).
 """
 import asyncio
 import hashlib
@@ -14,7 +19,6 @@ import os
 import re
 import time
 from html import escape
-from http.cookies import SimpleCookie
 from urllib.parse import quote, urlsplit
 
 import aiohttp
@@ -33,11 +37,20 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
 # fallback for servers bound only to 127.0.0.1 inside the container.
 CONNECTOR = os.environ.get("CONNECTOR", "")
 
-# Shared secret (ticket 012). Empty disables authentication.
+# Shared secret (ticket 012). Empty disables authentication. The UI is
+# protected by a login cookie; proxied hosts by a capability label (below).
 TOKEN = os.environ.get("PROXY_TOKEN", "")
 COOKIE = "devbox_proxy_auth"
-HANDOFF_PATH = "/__devbox_auth"
-HANDOFF_TTL = 60
+# A capability hostname minted by /go stays valid for between CAP_TTL and
+# 2*CAP_TTL seconds (the expiry is rounded to a window so repeated Opens give
+# the same hostname, and with it the same origin for localStorage etc.).
+CAP_TTL = int(os.environ.get("CAP_TTL", str(12 * 3600)))
+CAP_SIG_LEN = 32  # hex chars of HMAC kept: 128 bits
+# Docker events: debounce before re-listing, and how long a quiet stream may
+# stay silent before it is re-synced anyway (guards against a dead connection).
+EVENT_DEBOUNCE = float(os.environ.get("EVENT_DEBOUNCE", "0.1"))
+RESYNC_INTERVAL = float(os.environ.get("RESYNC_INTERVAL", "60"))
+EVENT_RETRY = 1.0  # first wait before reconnecting the event stream; doubles up to 30 s
 # Max wait for the upstream to connect / start answering (ticket 016): a
 # stalled app or tunnel becomes a 502 instead of an endless spinner.
 UPSTREAM_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "15"))
@@ -96,9 +109,11 @@ NIP_RE = re.compile(r"\.(\d{1,3}(\.\d{1,3}){3}|\d{1,3}(-\d{1,3}){3})\.nip\.io$")
 
 
 def parse_target(host):
-    """'3000.my-box.localhost' -> (3000, 'my-box'); None if not a proxy host.
-    With the default BASE_DOMAIN, '3000.my-box.<ip>.nip.io' works too (what
-    the UI links to when it was opened via an IP address)."""
+    """'3000.my-box.localhost' -> (3000, 'my-box', ''); None if not a proxy host.
+    With a token set the last label before the domain is the capability:
+    '3000.my-box.<cap>.localhost' -> (3000, 'my-box', '<cap>') (cap is None
+    when absent). With the default BASE_DOMAIN, '3000.my-box.<ip>.nip.io'
+    works too (what the UI links to when it was opened via an IP address)."""
     suffix = "." + BASE_DOMAIN
     if not host.endswith(suffix):
         m = NIP_RE.search(host) if BASE_DOMAIN == "localhost" else None
@@ -111,7 +126,11 @@ def parse_target(host):
     port = int(labels[0])
     if not 1 <= port <= 65535:
         return None
-    return port, ".".join(labels[1:])
+    if not TOKEN:
+        return port, ".".join(labels[1:]), ""
+    if len(labels) < 3:
+        return port, ".".join(labels[1:]), None
+    return port, ".".join(labels[1:-1]), labels[-1]
 
 
 def _sig(*parts):
@@ -124,18 +143,23 @@ def session_value(host):
     return _sig("session", host)
 
 
-def handoff_value(host, now=None):
-    exp = str(int((now or time.time()) + HANDOFF_TTL))
-    return f"{exp}.{_sig('handoff', host, exp)}"
+def cap_label(port, container, now=None):
+    """DNS label that authorizes requests to <port>.<container>.<label>.<domain>:
+    10 hex chars expiry + HMAC over (port, container, expiry)."""
+    exp = (int((now or time.time()) // CAP_TTL) + 2) * CAP_TTL
+    return f"{exp:010x}" + _sig("cap", str(port), container, str(exp))[:CAP_SIG_LEN]
 
 
-def handoff_valid(host, value, now=None):
-    exp, _, sig = value.partition(".")
-    return (exp.isdigit() and int(exp) >= (now or time.time())
-            and hmac.compare_digest(sig, _sig("handoff", host, exp)))
+def cap_valid(port, container, label, now=None):
+    if not TOKEN or not label or not re.fullmatch(r"[0-9a-f]{%d}" % (10 + CAP_SIG_LEN), label):
+        return False
+    exp = int(label[:10], 16)
+    return (exp >= (now or time.time())
+            and hmac.compare_digest(label[10:], _sig("cap", str(port), container, str(exp))[:CAP_SIG_LEN]))
 
 
 def authenticated(request, host):
+    """UI login: a host-only cookie."""
     if not TOKEN:
         return True
     return hmac.compare_digest(request.cookies.get(COOKIE, ""), session_value(host))
@@ -144,9 +168,6 @@ def authenticated(request, host):
 def set_session(resp, host):
     resp.set_cookie(COOKIE, session_value(host), httponly=True, samesite="Lax", path="/")
 
-
-HANDOFF_PAGE = ('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content="0;url=/">'
-                '<script>location.replace("/")</script><a href="/">Continue</a>')
 
 # Favicon: a box with an arrow passing through it. Inline so the single-file
 # image needs no extra assets.
@@ -243,7 +264,7 @@ async def index(request):
 async def go(request):
     c = request.query.get("c", "")
     port = request.query.get("port", "")
-    if not port.isdigit() or not c or c not in await list_devboxes(request.app):
+    if not port.isdigit() or not c or not await request.app["devboxes"].allowed(c):
         raise web.HTTPBadRequest(text="unknown container or bad port")
     _, public = split_host(request.headers.get("Host", ""))
     public = PUBLIC_PORT or public
@@ -252,13 +273,11 @@ async def go(request):
     ui_host, _ = split_host(request.headers.get("Host", ""))
     if domain == "localhost" and re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ui_host):
         domain = f"{ui_host.replace('.', '-')}.nip.io"  # *.localhost wouldn't reach this machine
-    host = f"{int(port)}.{quote(c)}.{domain}"
-    url = f"http://{host}{suffix}/"
-    if TOKEN:
-        # Cookies can't be shared across *.localhost (public suffix), so hand
-        # the browser a short-lived signed link that sets a per-host cookie.
-        url = f"http://{host}{suffix}{HANDOFF_PATH}?t={handoff_value(host)}"
-    raise web.HTTPFound(url)
+    # With a token the host itself is the credential: a signed, expiring label
+    # that needs no cookie (cookies can't be shared across *.localhost, and
+    # sandboxed iframes with an opaque origin can't send any).
+    cap = f".{cap_label(int(port), c)}" if TOKEN else ""
+    raise web.HTTPFound(f"http://{int(port)}.{quote(c)}{cap}.{domain}{suffix}/")
 
 
 def forward_headers(request, skip, port=None):
@@ -269,22 +288,16 @@ def forward_headers(request, skip, port=None):
     if REWRITE_HOST and port:
         headers["Host"] = f"localhost:{port}"
     headers["X-Forwarded-Proto"] = request.scheme
-    if TOKEN and "Cookie" in headers:  # don't leak our session cookie to apps
-        jar = SimpleCookie()
-        jar.load(headers["Cookie"])
-        jar.pop(COOKIE, None)
-        headers["Cookie"] = "; ".join(f"{m.key}={m.value}" for m in jar.values())
-        if not headers["Cookie"]:
-            del headers["Cookie"]
     return headers
 
 
 async def proxy(request, port, container):
-    if container not in await list_devboxes(request.app):
+    if not await request.app["devboxes"].allowed(container):
         return web.Response(status=404, text=f"No running devbox container named {container!r}.")
     upstream = f"{container}:{port}"
     path = request.raw_path
-    log.info("%s %s%s -> %s", request.method, request.headers.get("Host", ""), path, upstream)
+    # Host is left out of the log: it carries the capability label.
+    log.info("%s %s -> %s", request.method, path, upstream)
     try:
         try:
             return await forward(request, upstream, path, port)
@@ -421,21 +434,13 @@ async def router(request, handler):
     host, _ = split_host(request.headers.get("Host", ""))
     target = parse_target(host)
     if target:
-        if TOKEN and request.path == HANDOFF_PATH and handoff_valid(host, request.query.get("t", "")):
-            # Handled even when the browser already has a valid cookie (the
-            # cookie is the same on every visit); otherwise the request would
-            # be forwarded to the app, which 404s. Not a 302: a browser keeps
-            # the cross-site initiator across redirects, so "/" would be
-            # rejected too. A page that navigates itself makes the next
-            # request same-origin.
-            resp = web.Response(text=HANDOFF_PAGE, content_type="text/html")
-            set_session(resp, host)
-            return resp
-        if TOKEN and not authenticated(request, host):
+        port, container, cap = target
+        if TOKEN and not cap_valid(port, container, cap):
             return web.Response(
                 status=401,
-                text="Unauthorized. Open the DevBox proxy UI, log in and use it to open this port.")
-        return await proxy(request, *target)
+                text="Unauthorized (missing, wrong or expired capability hostname). "
+                     "Open the DevBox proxy UI, log in and use it to open this port.")
+        return await proxy(request, port, container)
     if request.path == "/login" and request.method == "POST":
         return await handler(request)
     if request.path in (ICON_PATH, "/favicon.ico") and request.method == "GET":
@@ -443,6 +448,111 @@ async def router(request, handler):
     if not authenticated(request, host):
         return web.Response(text=LOGIN % "", content_type="text/html", status=401)
     return await handler(request)
+
+
+EVENT_FILTERS = {
+    # What can change which containers are servable: start/stop, renames,
+    # attaching to / detaching from the network, and image (re)tagging.
+    "type": ["container", "network", "image"],
+    "event": ["start", "die", "destroy", "rename", "pause", "unpause",
+              "connect", "disconnect", "tag", "untag", "delete"],
+}
+
+
+class DevboxWatcher:
+    """In-memory set of servable container names (running, devbox image, on
+    DEVBOX_NET), kept current from Docker's event stream so proxied requests
+    need no Docker API call. Any relevant event triggers a debounced re-list,
+    so the set is always exactly what list_devboxes() returns: the allowlist
+    rules live in one place and non-devbox containers stay blocked.
+
+    The cache is only trusted while the event stream is up and the set is in
+    sync with it; otherwise allowed() falls back to asking Docker directly.
+    (Re)connecting re-lists and asks for events since just before it, so
+    nothing that happened during an outage is missed."""
+
+    def __init__(self, app):
+        self.app = app
+        self.names = frozenset()
+        self.synced = False
+        self.streaming = False
+        self._gen = 0  # bumped per (re)connect; a sync from before it doesn't count
+        self._dirty = asyncio.Event()
+        self._tasks = []
+
+    async def allowed(self, name):
+        if self.synced and self.streaming:
+            return name in self.names
+        return name in await list_devboxes(self.app)
+
+    async def sync(self):
+        gen = self._gen
+        names = frozenset(await list_devboxes(self.app))
+        if gen == self._gen:
+            self.names, self.synced = names, True
+
+    async def start(self):
+        try:
+            await self.sync()
+        except Exception as e:  # docker socket proxy may still be starting
+            log.warning("initial container list failed: %r", e)
+        self._tasks = [asyncio.create_task(self._sync_loop()), asyncio.create_task(self._stream_loop())]
+
+    async def stop(self):
+        for t in self._tasks:
+            t.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    async def _sync_loop(self):
+        while True:
+            await self._dirty.wait()
+            await asyncio.sleep(EVENT_DEBOUNCE)  # coalesce bursts
+            self._dirty.clear()
+            try:
+                await self.sync()
+            except Exception as e:
+                log.warning("container list failed: %r", e)
+                self.synced = False
+                await asyncio.sleep(2)
+                self._dirty.set()
+
+    async def _stream_loop(self):
+        backoff = EVENT_RETRY
+        while True:
+            since = time.time() - 1
+            self._gen += 1
+            self.synced = False
+            self._dirty.set()  # resync after every (re)connect
+            try:
+                async with self.app["docker"].get(
+                    f"{DOCKER_API}/events",
+                    params={"since": f"{since:.3f}", "filters": json.dumps(EVENT_FILTERS)},
+                    timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
+                ) as r:
+                    r.raise_for_status()
+                    self.streaming = True
+                    backoff = EVENT_RETRY
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(r.content.readline(), RESYNC_INTERVAL)
+                        except asyncio.TimeoutError:
+                            line = b"\n"  # quiet: re-list anyway in case the connection died silently
+                        if not line:
+                            break
+                        self._dirty.set()
+            except (aiohttp.ClientError, OSError) as e:
+                log.warning("docker event stream failed: %r", e)
+            finally:
+                self.streaming = False
+                self.synced = False
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+async def on_response_prepare(request, response):
+    # The capability hostname is a credential; keep it out of Referer headers
+    # sent to other sites (the app's own subresources are same-origin anyway).
+    response.headers["Referrer-Policy"] = "no-referrer"
 
 
 async def on_startup(app):
@@ -454,9 +564,12 @@ async def on_startup(app):
         timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
         cookie_jar=aiohttp.DummyCookieJar(),
     )
+    app["devboxes"] = DevboxWatcher(app)
+    await app["devboxes"].start()
 
 
 async def on_cleanup(app):
+    await app["devboxes"].stop()
     await app["docker"].close()
     await app["upstream"].close()
     for srv in app["tunnels"].values():
@@ -470,6 +583,7 @@ def make_app():
     app.router.add_post("/login", login)
     app.router.add_get(ICON_PATH, icon)
     app.on_startup.append(on_startup)
+    app.on_response_prepare.append(on_response_prepare)
     app.on_cleanup.append(on_cleanup)
     return app
 

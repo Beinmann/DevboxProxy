@@ -23,11 +23,21 @@ random one on first start and keeps it in `./.proxy_token` (mode 600,
 gitignored); it prints only the first 4 characters. Retrieve it with
 `cat .proxy_token`; rotate by deleting the file and restarting.
 
-Open the UI, paste the token into the login form. **Open** then redirects to
-the app host via a signed link valid for 60 s that sets a cookie for that
-one host (`*.localhost` can't share a cookie across subdomains), so
-websockets work too. The cookie is HttpOnly, host-bound, and not forwarded
-to the apps. `./start_proxy.sh --no-auth` disables the token (for testing
+Open the UI, paste the token into the login form (an HttpOnly cookie on the
+UI host). **Open** then redirects to a *capability hostname*,
+`http://<port>.<container>.<secret>.localhost:4242/`, where `<secret>` is a
+signed (HMAC with the token), expiring label bound to that port and
+container. Every request to that host is authorized by the host alone, with
+no cookie, so websockets work and so do sandboxed iframes with an opaque
+origin (e.g. widget frames), which can't send cookies. The label is valid
+for 12 h to 24 h (`CAP_TTL` seconds, default 43200; the expiry is rounded
+so re-opening within a window gives the same hostname, which keeps
+`localStorage` etc.); after that, use **Open** again. Rotating the token
+invalidates all labels. Treat the hostname like a password: the proxy sends
+`Referrer-Policy: no-referrer` on every response and leaves the host out of
+its logs, but an app that sends its own `Origin` header (CORS, POST) to
+another site, or whose URL you paste somewhere, still reveals it. Cookies
+set by the apps are passed through untouched. `./start_proxy.sh --no-auth` disables the token (for testing
 on a trusted machine; never combine with `--host` on a network you don't
 fully control). An empty `PROXY_TOKEN` inside the container does the same
 (warning at startup).
@@ -39,6 +49,16 @@ fully control). An empty `PROXY_TOKEN` inside the container does the same
   proxy), so apps see a root path — absolute asset URLs and HMR work. Host
   is passed through unchanged (Vite allows `*.localhost` by default);
   `X-Forwarded-*` headers are added.
+- **Allowlist.** The set of servable containers (running, devbox image, on
+  `devbox-net`) is held in memory and kept current from Docker's event
+  stream (via the socket proxy's `GET /events`), so proxied requests make no
+  Docker API call. Relevant events (start, die, rename, network
+  connect/disconnect, image retag, ...) trigger a debounced re-list using
+  the same rule as the UI, so non-devbox containers such as
+  `docker-socket-proxy` stay blocked. It is filled on startup and re-listed
+  after every (re)connect of the stream (asking for events since just before,
+  so nothing is missed) and every 60 s of silence (`RESYNC_INTERVAL`). While
+  the stream is down the proxy falls back to asking Docker per request.
 - **Reaching containers.** The proxy runs as a container on the shared
   Docker network `devbox-net`, which every devbox also joins (DevBox's
   compose file; the network is created by whichever script runs first).
@@ -55,7 +75,7 @@ fully control). An empty `PROXY_TOKEN` inside the container does the same
   see below). Access to the UI and to ports is token-protected. The proxy only forwards to
   containers of image `my-dev-box-v2` (not an open proxy), and it gets
   Docker info via `tecnativa/docker-socket-proxy` restricted to
-  `GET /containers`, never the raw socket.
+  `GET /containers` and `GET /events`, never the raw socket.
 - **Image name.** `my-dev-box-v2` is the image name built by
   [DevBox](https://github.com/Beinmann/DevBox)'s scripts and compose file.
   Set `DEVBOX_IMAGE` to override it if your DevBox image is named
@@ -106,9 +126,10 @@ build redirects or absolute URLs from `Host` would then point at `localhost`.
 
 - Boxes share `devbox-net`, so they can reach each other too.
 - HTTP only, no HTTPS or real domain.
-- No authentication: the only protection is the loopback-only port binding.
-  Any local process, and any website open in your browser (via
-  `*.localhost`), can reach the proxied ports.
+- Anyone holding a capability hostname can reach that port until it
+  expires; with `--no-auth` the only protection is the loopback-only port
+  binding, and any local process or website in your browser (via
+  `*.localhost`) can reach the proxied ports.
 - The `connector` service mounts the raw Docker socket as root, which is
   host-root-equivalent if compromised. See "Loopback-only servers" above for
   how its surface is limited.
@@ -119,7 +140,9 @@ build redirects or absolute URLs from `Host` would then point at `localhost`.
     .venv/bin/python -m unittest discover tests
 
 Covers routing, HTTP/POST/redirects, websockets, the loopback connector
-fallback and errors against a fake Docker API. The Docker packaging
+fallback, capability hostnames (valid, expired, tampered, wrong port or
+container), the event-driven allowlist (updates, bursts, reconnect/resync,
+fallback) and errors against a fake Docker API. The Docker packaging
 (compose, scripts) is not covered by the tests.
 
 ## License
